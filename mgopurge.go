@@ -50,7 +50,7 @@ func isPurgeableCollection(name string) bool {
 	if name == txnsC {
 		return false
 	}
-	if name == "system.indexes" {
+	if strings.HasPrefix(name, "system.") {
 		return false
 	}
 	if strings.HasPrefix(name, txnsC+".") {
