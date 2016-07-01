@@ -7,6 +7,7 @@ import (
 	"os"
 	"strings"
 
+	jujutxn "github.com/juju/txn"
 	"gopkg.in/mgo.v2"
 )
 
@@ -33,6 +34,10 @@ func main() {
 	err = PurgeMissing(txns, txnsStash, collections...)
 	checkErr("PurgeMissing", err)
 	fmt.Println("Done!")
+
+	fmt.Println("Pruning unreferenced transactions")
+	err = jujutxn.PruneTxns(db, txns)
+	checkErr("PruneTxns", err)
 }
 
 func dial(password string) (*mgo.Session, error) {

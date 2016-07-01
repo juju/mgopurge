@@ -2,6 +2,24 @@
 	"version": 0,
 	"dependencies": [
 		{
+			"importpath": "github.com/juju/loggo",
+			"repository": "https://github.com/juju/loggo",
+			"revision": "0e0537f18a29c2f0a814dad75b1ccc577852538a",
+			"branch": "master"
+		},
+		{
+			"importpath": "github.com/juju/txn",
+			"repository": "https://github.com/juju/txn",
+			"revision": "f56e7574090ce20e4efe21b86309b7a871dba530",
+			"branch": "master"
+		},
+		{
+			"importpath": "gopkg.in/check.v1",
+			"repository": "https://gopkg.in/check.v1",
+			"revision": "4f90aeace3a26ad7021961c297b22c42160c7b25",
+			"branch": "v1"
+		},
+		{
 			"importpath": "gopkg.in/mgo.v2",
 			"repository": "https://gopkg.in/mgo.v2",
 			"revision": "29cc868a5ca65f401ff318143f9408d02f4799cc",
