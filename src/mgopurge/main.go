@@ -13,6 +13,7 @@ import (
 
 const txnsC = "txns"
 const txnsStashC = txnsC + ".stash"
+const machinesC = "machines"
 
 func main() {
 	password, collections := processArgs(os.Args[1:])
@@ -33,7 +34,10 @@ func main() {
 		strings.Join(collections, ", "))
 	err = PurgeMissing(txns, txnsStash, collections...)
 	checkErr("PurgeMissing", err)
-	fmt.Println("Done!")
+
+	fmt.Println("Removing references to completed transactions in machines collection")
+	err = FixMachinesTxnQueue(db.C(machinesC), txns)
+	checkErr("FixMachinesTxnQueue", err)
 
 	fmt.Println("Pruning unreferenced transactions")
 	err = jujutxn.PruneTxns(db, txns)
