@@ -2,6 +2,7 @@ package main
 
 import (
 	"crypto/tls"
+	"flag"
 	"fmt"
 	"net"
 	"os"
@@ -16,17 +17,15 @@ const txnsStashC = txnsC + ".stash"
 const machinesC = "machines"
 
 func main() {
-	password, collections := processArgs(os.Args[1:])
+	args := commandLine()
 
-	session, err := dial(password)
+	session, err := dial(args)
 	checkErr("Dial", err)
 
 	// If the user didn't specify collections on the command line,
 	// inspect the DB to find them all.
 	db := session.DB("juju")
-	if len(collections) == 0 {
-		collections = getAllPurgeableCollections(db)
-	}
+	collections := getAllPurgeableCollections(db)
 	txns := db.C(txnsC)
 	txnsStash := db.C(txnsStashC)
 
@@ -44,33 +43,38 @@ func main() {
 	checkErr("PruneTxns", err)
 }
 
-func dial(password string) (*mgo.Session, error) {
-	tlsConfig := &tls.Config{
-		InsecureSkipVerify: true,
-	}
-	dial := func(addr *mgo.ServerAddr) (net.Conn, error) {
-		c, err := net.Dial("tcp", addr.String())
-		if err != nil {
-			return nil, err
-		}
-		cc := tls.Client(c, tlsConfig)
-		if err := cc.Handshake(); err != nil {
-			return nil, err
-		}
-		return cc, nil
-	}
+func dial(args commandLineArgs) (*mgo.Session, error) {
 	info := &mgo.DialInfo{
-		Addrs:      []string{"127.0.0.1:37017"},
-		Database:   "admin",
-		Username:   "admin",
-		Password:   password,
-		DialServer: dial,
+		Addrs: []string{net.JoinHostPort(args.hostname, args.port)},
+	}
+	if args.username != "" {
+		info.Database = "admin"
+		info.Username = args.username
+		info.Password = args.password
+	}
+	if args.ssl {
+		info.DialServer = dialSSL
 	}
 	session, err := mgo.DialWithInfo(info)
 	if err != nil {
 		return nil, err
 	}
 	return session, nil
+}
+
+func dialSSL(addr *mgo.ServerAddr) (net.Conn, error) {
+	c, err := net.Dial("tcp", addr.String())
+	if err != nil {
+		return nil, err
+	}
+	tlsConfig := &tls.Config{
+		InsecureSkipVerify: true,
+	}
+	cc := tls.Client(c, tlsConfig)
+	if err := cc.Handshake(); err != nil {
+		return nil, err
+	}
+	return cc, nil
 }
 
 func checkErr(label string, err error) {
@@ -80,23 +84,33 @@ func checkErr(label string, err error) {
 	}
 }
 
-func printUsageAndExit() {
-	fmt.Println(`
-usage: mgopurge <password> [collections...]
-
-If no collections are specified, all of Juju's collections will be 
-checked for orphaned transactions.
-`[1:])
-	os.Exit(1)
+type commandLineArgs struct {
+	hostname string
+	port     string
+	ssl      bool
+	username string
+	password string
 }
 
-func processArgs(args []string) (password string, collections []string) {
-	if len(args) < 1 {
-		printUsageAndExit()
+func commandLine() commandLineArgs {
+	flags := flag.NewFlagSet("mgopurge", flag.ExitOnError)
+	var a commandLineArgs
+	flags.StringVar(&a.hostname, "hostname", "localhost",
+		"hostname of the Juju MongoDB server")
+	flags.StringVar(&a.port, "port", "37017",
+		"port of the Juju MongoDB server")
+	flags.BoolVar(&a.ssl, "ssl", true,
+		"use SSL to connect to MonogDB ")
+	flags.StringVar(&a.username, "username", "admin",
+		"user for connecting to MonogDB (use \"\" to for no authentication)")
+	flags.StringVar(&a.password, "password", "",
+		"password for connecting to MonogDB")
+	flags.Parse(os.Args[1:])
+	if a.password == "" && a.username != "" {
+		fmt.Fprintf(os.Stderr, "error: --password must be used if username is provided\n")
+		os.Exit(2)
 	}
-	password = args[0]
-	collections = args[1:]
-	return
+	return a
 }
 
 func isPurgeableCollection(name string) bool {

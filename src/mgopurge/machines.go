@@ -48,7 +48,7 @@ func FixMachinesTxnQueue(machines, tc *mgo.Collection) error {
 			}
 		}
 		if fixCount > 0 {
-			fmt.Println("%s: removed %d completed txn-queue entries\n", doc.Id, fixCount)
+			fmt.Printf("%s: removed %d completed txn-queue entries\n", doc.Id, fixCount)
 		}
 		machineCount++
 	}
