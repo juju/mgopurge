@@ -16,15 +16,38 @@ const txnsStashC = txnsC + ".stash"
 func main() {
 	password, collections := processArgs(os.Args[1:])
 
+	session, err := dial(password)
+	checkErr("Dial", err)
+
+	// If the user didn't specify collections on the command line,
+	// inspect the DB to find them all.
+	db := session.DB("juju")
+	if len(collections) == 0 {
+		collections = getAllPurgeableCollections(db)
+	}
+	txns := db.C(txnsC)
+	txnsStash := db.C(txnsStashC)
+
+	fmt.Printf("Purging orphaned transactions for: %s\n",
+		strings.Join(collections, ", "))
+	err = PurgeMissing(txns, txnsStash, collections...)
+	checkErr("PurgeMissing", err)
+	fmt.Println("Done!")
+}
+
+func dial(password string) (*mgo.Session, error) {
 	tlsConfig := &tls.Config{
 		InsecureSkipVerify: true,
 	}
 	dial := func(addr *mgo.ServerAddr) (net.Conn, error) {
 		c, err := net.Dial("tcp", addr.String())
-		checkErr("Dial (DialServer)", err)
+		if err != nil {
+			return nil, err
+		}
 		cc := tls.Client(c, tlsConfig)
-		err = cc.Handshake()
-		checkErr("Handshake", err)
+		if err := cc.Handshake(); err != nil {
+			return nil, err
+		}
 		return cc, nil
 	}
 	info := &mgo.DialInfo{
@@ -35,22 +58,10 @@ func main() {
 		DialServer: dial,
 	}
 	session, err := mgo.DialWithInfo(info)
-	checkErr("Dial", err)
-
-	// If the user didn't specify collections on the command line,
-	// inspect the DB to find them all.
-	db := session.DB("juju")
-	if len(collections) == 0 {
-		collections = getAllPurgeableCollections(db)
+	if err != nil {
+		return nil, err
 	}
-
-	txns := db.C(txnsC)
-	txnsStash := db.C(txnsStashC)
-	fmt.Printf("Purging orphaned transactions for: %s\n",
-		strings.Join(collections, ", "))
-	err = PurgeMissing(txns, txnsStash, collections...)
-	checkErr("PurgeMissing", err)
-	fmt.Println("Done!")
+	return session, nil
 }
 
 func checkErr(label string, err error) {
