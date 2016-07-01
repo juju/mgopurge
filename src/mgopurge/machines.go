@@ -36,25 +36,26 @@ func FixMachinesTxnQueue(machines, tc *mgo.Collection) error {
 	var doc TDoc
 	machineCount := 0
 	for iter.Next(&doc) {
-		fixCount := 0
+		var pullTokens []interface{}
 		for _, txnToken := range doc.TxnQueue {
 			if txnId, ok := tokenToId(txnToken); ok {
 				if txnCompleted(txnId) {
-					if err := pullTxn(machines, doc.Id, txnId); err != nil {
-						return err
-					}
-					fixCount++
+					pullTokens = append(pullTokens, txnToken)
 				}
 			}
 		}
-		if fixCount > 0 {
-			fmt.Printf("%s: removed %d completed txn-queue entries\n", doc.Id, fixCount)
+		if len(pullTokens) > 0 {
+			err := machines.UpdateId(doc.Id, bson.M{"$pullAll": bson.M{"txn-queue": pullTokens}})
+			if err != nil {
+				return err
+			}
+			logger.Debugf("machine %s: removed %d txn-queue entries", doc.Id, len(pullTokens))
 		}
 		machineCount++
 	}
 	if err := iter.Close(); err != nil {
 		return fmt.Errorf("machines iteration error: %v", err)
 	}
-	fmt.Println("Finished checking %d machine documents\n", machineCount)
+	logger.Infof("Finished checking %d machine documents", machineCount)
 	return nil
 }

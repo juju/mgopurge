@@ -10,6 +10,7 @@ import (
 
 	jujutxn "github.com/juju/txn"
 	"gopkg.in/mgo.v2"
+	"gopkg.in/mgo.v2/bson"
 )
 
 const txnsC = "txns"
@@ -17,30 +18,31 @@ const txnsStashC = txnsC + ".stash"
 const machinesC = "machines"
 
 func main() {
+	checkErr("setupLogging", setupLogging())
 	args := commandLine()
 
 	session, err := dial(args)
 	checkErr("Dial", err)
 
-	// If the user didn't specify collections on the command line,
-	// inspect the DB to find them all.
 	db := session.DB("juju")
 	collections := getAllPurgeableCollections(db)
 	txns := db.C(txnsC)
-	txnsStash := db.C(txnsStashC)
 
-	fmt.Printf("Purging orphaned transactions for: %s\n",
-		strings.Join(collections, ", "))
-	err = PurgeMissing(txns, txnsStash, collections...)
+	logger.Infof("Purging orphaned transactions for %d juju collections...\n", len(collections))
+	err = PurgeMissing(txns, db.C(txnsStashC), collections...)
 	checkErr("PurgeMissing", err)
 
-	fmt.Println("Removing references to completed transactions in machines collection")
+	logger.Infof("Removing references to completed transactions in machines collection...")
 	err = FixMachinesTxnQueue(db.C(machinesC), txns)
 	checkErr("FixMachinesTxnQueue", err)
 
-	fmt.Println("Pruning unreferenced transactions")
+	logger.Infof("Pruning unreferenced transactions...")
 	err = jujutxn.PruneTxns(db, txns)
 	checkErr("PruneTxns", err)
+
+	logger.Infof("Compacting database to release disk space...")
+	err = db.Run(bson.M{"repairDatabase": 1}, nil)
+	checkErr("repairDatabase", err)
 }
 
 func dial(args commandLineArgs) (*mgo.Session, error) {
@@ -79,7 +81,7 @@ func dialSSL(addr *mgo.ServerAddr) (net.Conn, error) {
 
 func checkErr(label string, err error) {
 	if err != nil {
-		fmt.Println(label+":", err)
+		logger.Errorf("%s: %s", label, err)
 		os.Exit(1)
 	}
 }

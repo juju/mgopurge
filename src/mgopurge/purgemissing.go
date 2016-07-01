@@ -47,14 +47,14 @@ func PurgeMissing(tc, sc *mgo.Collection, collections ...string) error {
 			for _, txnToken := range tdoc.TxnQueue {
 				if txnId, ok := tokenToId(txnToken); ok {
 					if !txnExists(txnId) {
-						fmt.Printf("purging from document %s/%v the missing transaction id %s\n",
+						logger.Debugf("purging from document %s/%v the missing transaction id %s\n",
 							collection, tdoc.Id, txnId)
 						if err := pullTxn(c, tdoc.Id, txnId); err != nil {
 							return err
 						}
 					}
 				} else {
-					fmt.Printf("purging from document %s/%v the invalid transaction token %#v\n",
+					logger.Debugf("purging from document %s/%v the invalid transaction token %#v\n",
 						collection, tdoc.Id, txnToken)
 					if err := pullToken(c, tdoc.Id, txnToken); err != nil {
 						return err
@@ -78,14 +78,14 @@ func PurgeMissing(tc, sc *mgo.Collection, collections ...string) error {
 		for _, txnToken := range stdoc.TxnQueue {
 			if txnId, ok := tokenToId(txnToken); ok {
 				if !txnExists(txnId) {
-					fmt.Printf("purging from stash document %s/%v the missing transaction id %s\n",
+					logger.Debugf("purging from stash document %s/%v the missing transaction id %s\n",
 						stdoc.Id.C, stdoc.Id.Id, txnId)
 					if err := pullTxn(sc, stdoc.Id, txnId); err != nil {
 						return err
 					}
 				}
 			} else {
-				fmt.Printf("purging from stash document %s/%v the invalid transaction token %#v\n",
+				logger.Debugf("purging from stash document %s/%v the invalid transaction token %#v\n",
 					stdoc.Id.C, stdoc.Id.Id, txnToken)
 				if err := pullToken(sc, stdoc.Id, txnToken); err != nil {
 					return err
