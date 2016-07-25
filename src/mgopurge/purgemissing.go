@@ -1,3 +1,8 @@
+// This file contains a modified version of a function from mgo
+// (https://github.com/go-mgo/mgo)
+// Copyright (c) 2010-2013 - Gustavo Niemeyer <gustavo@niemeyer.net>
+// mgo's license is can be found at https://raw.githubusercontent.com/go-mgo/mgo/v2/LICENSE
+
 package main
 
 import (
