@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"crypto/tls"
 	"flag"
 	"fmt"
@@ -17,9 +18,19 @@ const txnsC = "txns"
 const txnsStashC = txnsC + ".stash"
 const machinesC = "machines"
 
+var controllerPrompt = `
+This program should not be run while any Juju controller machine
+agents are running.
+
+Have all controller machine agents been shut down?`[1:]
+
 func main() {
 	checkErr("setupLogging", setupLogging())
 	args := commandLine()
+
+	if args.doPrompt && !promptYN(controllerPrompt) {
+		return
+	}
 
 	session, err := dial(args)
 	checkErr("Dial", err)
@@ -54,6 +65,26 @@ func main() {
 		err = db.Run(bson.M{"repairDatabase": 1}, nil)
 		checkErr("repairDatabase", err)
 	}
+}
+
+func promptYN(question string) bool {
+	fmt.Printf("%s [y/n] ", question)
+	os.Stdout.Sync()
+	scanner := bufio.NewScanner(os.Stdin)
+	if !scanner.Scan() {
+		return false
+	}
+	switch strings.ToLower(scanner.Text()) {
+	case "y", "yes":
+		return true
+	default:
+		return false
+	}
+}
+
+func printAndFlush(s string) {
+	fmt.Print(s)
+	os.Stdout.Sync()
 }
 
 func dial(args commandLineArgs) (*mgo.Session, error) {
@@ -103,6 +134,7 @@ type commandLineArgs struct {
 	ssl        bool
 	username   string
 	password   string
+	doPrompt   bool
 	doMachines bool
 	doPrune    bool
 	doCompcact bool
@@ -121,6 +153,7 @@ func commandLine() commandLineArgs {
 		"user for connecting to MonogDB (use \"\" to for no authentication)")
 	flags.StringVar(&a.password, "password", "",
 		"password for connecting to MonogDB")
+	yes := flags.Bool("yes", false, "answer 'yes' to prompts")
 	noMachines := flags.Bool("no-machines", false,
 		"skip removal of completed txn-queue entries from machines collection")
 	noPrune := flags.Bool("no-prune", false,
@@ -134,6 +167,7 @@ func commandLine() commandLineArgs {
 		fmt.Fprintf(os.Stderr, "error: -password must be used if username is provided\n")
 		os.Exit(2)
 	}
+	a.doPrompt = !*yes
 	a.doMachines = !*noMachines
 	a.doPrune = !*noPrune
 	a.doCompcact = !*noCompact
