@@ -35,18 +35,25 @@ func main() {
 	logger.Infof("Purging orphaned transactions for %d juju collections...\n", len(collections))
 	err = PurgeMissing(txns, db.C(txnsStashC), collections...)
 	checkErr("PurgeMissing", err)
+	logger.Infof("Done compacting orphaned transactions.")
 
-	logger.Infof("Removing references to completed transactions in machines collection...")
-	err = FixMachinesTxnQueue(db.C(machinesC), txns)
-	checkErr("FixMachinesTxnQueue", err)
+	if args.doMachines {
+		logger.Infof("Removing references to completed transactions in machines collection...")
+		err = FixMachinesTxnQueue(db.C(machinesC), txns)
+		checkErr("FixMachinesTxnQueue", err)
+	}
 
-	logger.Infof("Pruning unreferenced transactions...")
-	err = jujutxn.PruneTxns(db, txns)
-	checkErr("PruneTxns", err)
+	if args.doPrune {
+		logger.Infof("Pruning unreferenced transactions...")
+		err = jujutxn.PruneTxns(db, txns)
+		checkErr("PruneTxns", err)
+	}
 
-	logger.Infof("Compacting database to release disk space...")
-	err = db.Run(bson.M{"repairDatabase": 1}, nil)
-	checkErr("repairDatabase", err)
+	if args.doCompcact {
+		logger.Infof("Compacting database to release disk space...")
+		err = db.Run(bson.M{"repairDatabase": 1}, nil)
+		checkErr("repairDatabase", err)
+	}
 }
 
 func dial(args commandLineArgs) (*mgo.Session, error) {
@@ -91,11 +98,14 @@ func checkErr(label string, err error) {
 }
 
 type commandLineArgs struct {
-	hostname string
-	port     string
-	ssl      bool
-	username string
-	password string
+	hostname   string
+	port       string
+	ssl        bool
+	username   string
+	password   string
+	doMachines bool
+	doPrune    bool
+	doCompcact bool
 }
 
 func commandLine() commandLineArgs {
@@ -111,11 +121,22 @@ func commandLine() commandLineArgs {
 		"user for connecting to MonogDB (use \"\" to for no authentication)")
 	flags.StringVar(&a.password, "password", "",
 		"password for connecting to MonogDB")
+	noMachines := flags.Bool("no-machines", false,
+		"skip removal of completed txn-queue entries from machines collection")
+	noPrune := flags.Bool("no-prune", false,
+		"skip pruning of completed transactions")
+	noCompact := flags.Bool("no-compact", false,
+		"skip compacting of database")
+
 	flags.Parse(os.Args[1:])
+
 	if a.password == "" && a.username != "" {
 		fmt.Fprintf(os.Stderr, "error: -password must be used if username is provided\n")
 		os.Exit(2)
 	}
+	a.doMachines = !*noMachines
+	a.doPrune = !*noPrune
+	a.doCompcact = !*noCompact
 	return a
 }
 
