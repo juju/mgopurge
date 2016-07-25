@@ -28,6 +28,10 @@ func main() {
 	collections := getAllPurgeableCollections(db)
 	txns := db.C(txnsC)
 
+	logger.Infof("Repairing runaway transactions for apiHostPorts document...")
+	err = FixApiHostPorts(db, txns)
+	checkErr("FixApiHostPorts", err)
+
 	logger.Infof("Purging orphaned transactions for %d juju collections...\n", len(collections))
 	err = PurgeMissing(txns, db.C(txnsStashC), collections...)
 	checkErr("PurgeMissing", err)
