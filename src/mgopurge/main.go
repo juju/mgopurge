@@ -113,7 +113,7 @@ func commandLine() commandLineArgs {
 		"password for connecting to MonogDB")
 	flags.Parse(os.Args[1:])
 	if a.password == "" && a.username != "" {
-		fmt.Fprintf(os.Stderr, "error: --password must be used if username is provided\n")
+		fmt.Fprintf(os.Stderr, "error: -password must be used if username is provided\n")
 		os.Exit(2)
 	}
 	return a
