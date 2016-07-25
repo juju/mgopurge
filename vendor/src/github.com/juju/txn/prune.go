@@ -145,6 +145,7 @@ func PruneTxns(db *mgo.Database, txns *mgo.Collection) error {
 		Ops []txn.Op      `bson:"o"`
 	}
 
+	logger.Debugf("loading all completed transactions")
 	completed := bson.M{
 		"s": bson.M{"$in": []int{taborted, tapplied}},
 	}
@@ -158,6 +159,8 @@ func PruneTxns(db *mgo.Database, txns *mgo.Collection) error {
 	if err := iter.Close(); err != nil {
 		return fmt.Errorf("failed to read all txns: %v", err)
 	}
+	logger.Debugf("found %d completed transactions across %d collections",
+		len(txnIds), len(collNames))
 
 	// Transactions may also be referenced in the stash.
 	collNames["txns.stash"] = present
@@ -171,6 +174,7 @@ func PruneTxns(db *mgo.Database, txns *mgo.Collection) error {
 	// removal of transactions run while pruning executes.
 	//
 	for collName := range collNames {
+		logger.Tracef("checking %s for transaction references", collName)
 		coll := db.C(collName)
 		var tDoc struct {
 			Queue []string `bson:"txn-queue"`
@@ -187,10 +191,11 @@ func PruneTxns(db *mgo.Database, txns *mgo.Collection) error {
 	}
 
 	// Remove the unreferenced transactions.
-	err := bulkRemoveTxns(txns, txnIds)
-	if err != nil {
+	logger.Debugf("%d transactions to remove", len(txnIds))
+	if err := bulkRemoveTxns(txns, txnIds); err != nil {
 		return fmt.Errorf("txn removal failed: %v", err)
 	}
+	logger.Debugf("completed transactions pruned")
 	return nil
 }
 
@@ -204,23 +209,26 @@ func txnTokenToId(token string) bson.ObjectId {
 // be significantly more efficient than removing one document per
 // remove query while also not trigger query document size limits.
 func bulkRemoveTxns(txns *mgo.Collection, txnIds map[bson.ObjectId]struct{}) error {
+	removeCount := 0
 	removeTxns := func(ids []bson.ObjectId) error {
 		_, err := txns.RemoveAll(bson.M{"_id": bson.M{"$in": ids}})
 		switch err {
 		case nil, mgo.ErrNotFound:
 			// It's OK for txns to no longer exist. Another process
 			// may have concurrently pruned them.
+			removeCount += len(ids)
+			logger.Tracef("%d completed transactions removed", removeCount)
 			return nil
 		default:
 			return err
 		}
 	}
 
-	const chunkMax = 1024
-	chunk := make([]bson.ObjectId, 0, chunkMax)
+	const chunkSize = 1e5
+	chunk := make([]bson.ObjectId, 0, chunkSize)
 	for txnId := range txnIds {
 		chunk = append(chunk, txnId)
-		if len(chunk) == chunkMax {
+		if len(chunk) == chunkSize {
 			if err := removeTxns(chunk); err != nil {
 				return err
 			}
