@@ -2,11 +2,12 @@
 
 This is a tool to repair broken mgo/txn transaction references in a
 Juju MongoDB instance. It is only of interest to people responsible
-for Juju installations that have had some kind of catastrophic
-database corruption.
+for Juju installations that are experiencing catastrophic database
+corruption. It should not be used casually. Improper use could lead to
+irreverible damage to Juju deployments.
 
-You need to run on it one of the Juju controller machines. All
-controller machine agents must be shut down. Also ensure that the
+mgopurge is typically run on one of the Juju controller machines. All
+controller machine agents must be shut down. Please ensure that the
 MongoDB replicaset is in a good state before running it.
 
 You'll need to determine the password for Juju's MongoDB by looking in
@@ -29,7 +30,7 @@ against a Juju database has been dumped and restored into a temporary
 MongoDB server.
 
 A number of options are available for controlling which kinds of
-repairs mgopurge will attempt (it will try them all by default).
+repairs mgopurge will attempt (it will perform them all by default).
 
 See `./mgopurge --help` for further information.
 
