@@ -19,6 +19,11 @@ const txnsStashC = txnsC + ".stash"
 const machinesC = "machines"
 
 var controllerPrompt = `
+This program should only be used to recover from specific transaction
+related problems in a Juju database. Casual use is strongly
+discouraged. Irreversible damage may be caused to a Juju deployment
+through improper use of this tool.
+
 This program should not be run while any Juju controller machine
 agents are running.
 
