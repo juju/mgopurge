@@ -28,7 +28,9 @@ func FixApiHostPorts(db *mgo.Database, txns *mgo.Collection) error {
 
 	if len(doc.TxnQueue) > 1 {
 		logger.Infof("%d transactions to be cleared from apiHostPorts doc", len(doc.TxnQueue))
-		err = coll.UpdateId(apiHostPortsKey, bson.M{"$set": bson.M{"txn-queue": bson.D{}}})
+		err := coll.UpdateId(apiHostPortsKey, bson.M{
+			"$set": bson.M{"txn-queue": []string{}},
+		})
 		if err != nil {
 			return err
 		}
