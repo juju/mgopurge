@@ -26,12 +26,16 @@ func FixApiHostPorts(db *mgo.Database, txns *mgo.Collection) error {
 		return err
 	}
 
-	if len(doc.TxnQueue) > 1 {
+	if len(doc.TxnQueue) == 0 {
+		// Possibly wrong type (due to previous mgopurge bug). Ensure it's correct.
+		logger.Infof("Fixing incorrect txn-queue type on apiHostPorts doc")
+		if err := clearApiHostPortsTxns(coll); err != nil {
+			return err
+		}
+	} else if len(doc.TxnQueue) > 1 {
+		// Runaway transactions. Fix it.
 		logger.Infof("%d transactions to be cleared from apiHostPorts doc", len(doc.TxnQueue))
-		err := coll.UpdateId(apiHostPortsKey, bson.M{
-			"$set": bson.M{"txn-queue": []string{}},
-		})
-		if err != nil {
+		if err := clearApiHostPortsTxns(coll); err != nil {
 			return err
 		}
 
@@ -48,7 +52,6 @@ func FixApiHostPorts(db *mgo.Database, txns *mgo.Collection) error {
 				return err
 			}
 		}
-
 		logger.Infof("apiHostPorts transactions cleared")
 	} else {
 		logger.Infof("apiHostPorts doc looks ok - not repairing")
@@ -70,4 +73,10 @@ func getApiHostPortsDoc(db *mgo.Database) (*mgo.Collection, *tdoc, error) {
 		return nil, nil, err
 	}
 	return coll, &doc, nil
+}
+
+func clearApiHostPortsTxns(coll *mgo.Collection) error {
+	return coll.UpdateId(apiHostPortsKey, bson.M{
+		"$set": bson.M{"txn-queue": []string{}},
+	})
 }
