@@ -15,6 +15,7 @@ import (
 	jujutxn "github.com/juju/txn"
 	"gopkg.in/mgo.v2"
 	"gopkg.in/mgo.v2/bson"
+	"gopkg.in/mgo.v2/txn"
 )
 
 const txnsC = "txns"
@@ -68,10 +69,18 @@ func main() {
 		checkErr("PruneTxns", err)
 	}
 
-	if args.doCompcact {
+	if args.doCompact {
 		logger.Infof("Compacting database to release disk space...")
 		err = db.Run(bson.M{"repairDatabase": 1}, nil)
 		checkErr("repairDatabase", err)
+	}
+
+	if args.doResume {
+		logger.Infof("Resuming transactions...")
+		if err := ResumeAll(db.C(txnsC)); err != nil {
+			checkErr("ResumeAll", err)
+		}
+		logger.Infof("Resuming done")
 	}
 }
 
@@ -145,7 +154,8 @@ type commandLineArgs struct {
 	doPrompt   bool
 	doMachines bool
 	doPrune    bool
-	doCompcact bool
+	doCompact  bool
+	doResume   bool
 }
 
 func commandLine() commandLineArgs {
@@ -168,6 +178,8 @@ func commandLine() commandLineArgs {
 		"skip pruning of completed transactions")
 	noCompact := flags.Bool("no-compact", false,
 		"skip compacting of database")
+	noResume := flags.Bool("no-resume", false,
+		"skip reprocessing of incomplete transactions")
 
 	flags.Parse(os.Args[1:])
 
@@ -178,7 +190,8 @@ func commandLine() commandLineArgs {
 	a.doPrompt = !*yes
 	a.doMachines = !*noMachines
 	a.doPrune = !*noPrune
-	a.doCompcact = !*noCompact
+	a.doCompact = !*noCompact
+	a.doResume = !*noResume
 	return a
 }
 
@@ -204,4 +217,9 @@ func getAllPurgeableCollections(db *mgo.Database) (collections []string) {
 		}
 	}
 	return
+}
+
+func ResumeAll(tc *mgo.Collection) error {
+	runner := txn.NewRunner(tc)
+	return runner.ResumeAll()
 }
