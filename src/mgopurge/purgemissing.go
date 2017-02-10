@@ -24,7 +24,7 @@ import (
 //
 // NOTE! - This is a fork of the upstream PurgeMissing which correctly
 // handles invalid txn tokens.
-func PurgeMissing(tc, sc *mgo.Collection, collections ...string) error {
+func PurgeMissing(tc, sc *mgo.Collection, collNames ...string) error {
 
 	type TDoc struct {
 		Id       interface{}   "_id"
@@ -32,7 +32,11 @@ func PurgeMissing(tc, sc *mgo.Collection, collections ...string) error {
 	}
 
 	found := make(map[bson.ObjectId]bool)
-	txnExists := func(txnId bson.ObjectId) bool {
+	txnTokenOk := func(txnToken interface{}) bool {
+		txnId, ok := tokenToId(txnToken)
+		if !ok {
+			return false
+		}
 		if found[txnId] {
 			return true
 		}
@@ -43,32 +47,28 @@ func PurgeMissing(tc, sc *mgo.Collection, collections ...string) error {
 		return false
 	}
 
-	sort.Strings(collections)
-	for _, collection := range collections {
-		c := tc.Database.C(collection)
+	sort.Strings(collNames)
+	for _, collName := range collNames {
+		c := tc.Database.C(collName)
 		iter := c.Find(nil).Select(bson.M{"_id": 1, "txn-queue": 1}).Iter()
 		var tdoc TDoc
 		for iter.Next(&tdoc) {
+			var badTokens []interface{}
 			for _, txnToken := range tdoc.TxnQueue {
-				if txnId, ok := tokenToId(txnToken); ok {
-					if !txnExists(txnId) {
-						logger.Debugf("purging from document %s/%v the missing transaction id %s\n",
-							collection, tdoc.Id, txnId)
-						if err := pullTxn(c, tdoc.Id, txnId); err != nil {
-							return err
-						}
-					}
-				} else {
-					logger.Debugf("purging from document %s/%v the invalid transaction token %#v\n",
-						collection, tdoc.Id, txnToken)
-					if err := pullToken(c, tdoc.Id, txnToken); err != nil {
-						return err
-					}
+				if !txnTokenOk(txnToken) {
+					badTokens = append(badTokens, txnToken)
+				}
+			}
+			if len(badTokens) > 0 {
+				logger.Debugf("document %s/%v: purging %d orphaned or invalid txn tokens",
+					collName, tdoc.Id, len(badTokens))
+				if err := pullTokens(c, tdoc.Id, badTokens); err != nil {
+					return err
 				}
 			}
 		}
 		if err := iter.Close(); err != nil {
-			return fmt.Errorf("transaction queue iteration error for %s: %v", collection, err)
+			return fmt.Errorf("transaction queue iteration error for %s: %v", collName, err)
 		}
 	}
 
@@ -80,24 +80,21 @@ func PurgeMissing(tc, sc *mgo.Collection, collections ...string) error {
 	iter := sc.Find(nil).Select(bson.M{"_id": 1, "txn-queue": 1}).Iter()
 	var stdoc StashTDoc
 	for iter.Next(&stdoc) {
+		var badTokens []interface{}
 		for _, txnToken := range stdoc.TxnQueue {
-			if txnId, ok := tokenToId(txnToken); ok {
-				if !txnExists(txnId) {
-					logger.Debugf("purging from stash document %s/%v the missing transaction id %s\n",
-						stdoc.Id.C, stdoc.Id.Id, txnId)
-					if err := pullTxn(sc, stdoc.Id, txnId); err != nil {
-						return err
-					}
-				}
-			} else {
-				logger.Debugf("purging from stash document %s/%v the invalid transaction token %#v\n",
-					stdoc.Id.C, stdoc.Id.Id, txnToken)
-				if err := pullToken(sc, stdoc.Id, txnToken); err != nil {
-					return err
-				}
+			if !txnTokenOk(txnToken) {
+				badTokens = append(badTokens, txnToken)
+			}
+		}
+		if len(badTokens) > 0 {
+			logger.Debugf("stash document %s/%v: purging %d orphaned or invalid txn tokens",
+				stdoc.Id.C, stdoc.Id.Id, len(badTokens))
+			if err := pullTokens(sc, stdoc.Id, badTokens); err != nil {
+				return err
 			}
 		}
 	}
+
 	if err := iter.Close(); err != nil {
 		return fmt.Errorf("transaction stash iteration error: %v", err)
 	}
@@ -123,20 +120,11 @@ func tokenToId(token interface{}) (bson.ObjectId, bool) {
 	return bson.ObjectIdHex(tokenStr[:24]), true
 }
 
-func pullToken(collection *mgo.Collection, docId interface{}, token interface{}) error {
+func pullTokens(collection *mgo.Collection, docId interface{}, tokens []interface{}) error {
 	type M bson.M
-	err := collection.UpdateId(docId, M{"$pullAll": M{"txn-queue": []interface{}{token}}})
+	err := collection.UpdateId(docId, M{"$pullAll": M{"txn-queue": tokens}})
 	if err != nil {
-		return fmt.Errorf("error purging invalid token %#v: %v", token, err)
-	}
-	return nil
-}
-
-func pullTxn(collection *mgo.Collection, docId interface{}, txnId bson.ObjectId) error {
-	type M bson.M
-	err := collection.UpdateId(docId, M{"$pull": M{"txn-queue": M{"$regex": "^" + txnId.Hex() + "_*"}}})
-	if err != nil {
-		return fmt.Errorf("error purging missing transaction %s: %v", txnId.Hex(), err)
+		return fmt.Errorf("error purging invalid tokens from %s/%v: %v", collection.Name, docId, err)
 	}
 	return nil
 }
