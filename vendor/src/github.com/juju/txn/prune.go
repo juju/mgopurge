@@ -211,8 +211,12 @@ func txnTokenToId(token string) bson.ObjectId {
 func bulkRemoveTxns(txns *mgo.Collection, txnIds map[bson.ObjectId]struct{}) error {
 	removeCount := 0
 	removeTxns := func(ids []bson.ObjectId) error {
-		_, err := txns.RemoveAll(bson.M{"_id": bson.M{"$in": ids}})
-		switch err {
+		bulk := txns.Bulk()
+		bulk.Unordered()
+		for _, id := range ids {
+			bulk.Remove(bson.D{{"_id", id}})
+		}
+		switch _, err := bulk.Run(); err {
 		case nil, mgo.ErrNotFound:
 			// It's OK for txns to no longer exist. Another process
 			// may have concurrently pruned them.
@@ -224,7 +228,8 @@ func bulkRemoveTxns(txns *mgo.Collection, txnIds map[bson.ObjectId]struct{}) err
 		}
 	}
 
-	const chunkSize = 1e5
+	// There must not be more than 1000 operations in a bulk operation.
+	const chunkSize = 1000
 	chunk := make([]bson.ObjectId, 0, chunkSize)
 	for txnId := range txnIds {
 		chunk = append(chunk, txnId)

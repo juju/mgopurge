@@ -14,9 +14,11 @@ package txn
 
 import (
 	stderrors "errors"
+	"strings"
 
 	"github.com/juju/loggo"
 	"gopkg.in/mgo.v2"
+	"gopkg.in/mgo.v2/bson"
 	"gopkg.in/mgo.v2/txn"
 )
 
@@ -76,11 +78,19 @@ type Runner interface {
 	MaybePruneTransactions(pruneFactor float32) error
 }
 
+type txnRunner interface {
+	Run([]txn.Op, bson.ObjectId, interface{}) error
+	ResumeAll() error
+}
+
 type transactionRunner struct {
 	db                        *mgo.Database
 	transactionCollectionName string
 	changeLogName             string
 	testHooks                 chan ([]TestHook)
+	runTransactionObserver    func([]txn.Op, error)
+
+	newRunner func() txnRunner
 }
 
 var _ Runner = (*transactionRunner)(nil)
@@ -100,6 +110,11 @@ type RunnerParams struct {
 	// ChangeLogName is the mgo transaction runner change log,
 	// defaults to "txns.log" if unspecified.
 	ChangeLogName string
+
+	// RunTransactionObserver, if non-nil, will be called when
+	// a Run or RunTransaction call has completed. It will be
+	// passed the txn.Ops and the error result.
+	RunTransactionObserver func([]txn.Op, error)
 }
 
 // NewRunner returns a Runner which runs transactions for the database specified in params.
@@ -110,6 +125,7 @@ func NewRunner(params RunnerParams) Runner {
 		db: params.Database,
 		transactionCollectionName: params.TransactionCollectionName,
 		changeLogName:             params.ChangeLogName,
+		runTransactionObserver:    params.RunTransactionObserver,
 	}
 	if txnRunner.transactionCollectionName == "" {
 		txnRunner.transactionCollectionName = defaultTxnCollectionName
@@ -119,10 +135,11 @@ func NewRunner(params RunnerParams) Runner {
 	}
 	txnRunner.testHooks = make(chan ([]TestHook), 1)
 	txnRunner.testHooks <- nil
+	txnRunner.newRunner = txnRunner.newRunnerImpl
 	return txnRunner
 }
 
-func (tr *transactionRunner) newRunner() *txn.Runner {
+func (tr *transactionRunner) newRunnerImpl() txnRunner {
 	db := tr.db
 	runner := txn.NewRunner(db.C(tr.transactionCollectionName))
 	runner.ChangeLog(db.C(tr.changeLogName))
@@ -145,7 +162,13 @@ func (tr *transactionRunner) Run(transactions TransactionSource) error {
 		if err := tr.RunTransaction(ops); err == nil {
 			return nil
 		} else if err != txn.ErrAborted {
-			return err
+			// Mongo very occasionally returns an intermittent
+			// "unexpected message" error. Retry those.
+			// However if this is the last time, return that error
+			// rather than the excessive contention error.
+			if !strings.HasSuffix(err.Error(), "unexpected message") || i == (nrRetries-1) {
+				return err
+			}
 		}
 	}
 	return ErrExcessiveContention
@@ -177,7 +200,11 @@ func (tr *transactionRunner) RunTransaction(ops []txn.Op) error {
 		}
 	}
 	runner := tr.newRunner()
-	return runner.Run(ops, "", nil)
+	err := runner.Run(ops, "", nil)
+	if tr.runTransactionObserver != nil {
+		tr.runTransactionObserver(ops, err)
+	}
+	return err
 }
 
 // ResumeTransactions is defined on Runner.

@@ -4,6 +4,8 @@
 package txn_test
 
 import (
+	"errors"
+
 	"github.com/juju/testing"
 	gc "gopkg.in/check.v1"
 	"gopkg.in/mgo.v2"
@@ -197,6 +199,7 @@ func (s *txnSuite) TestRetryHooks(c *gc.C) {
 
 func (s *txnSuite) TestExcessiveContention(c *gc.C) {
 	maxAttempt := 0
+	// This keeps failing because the Assert is wrong.
 	buildTxn := func(attempt int) ([]txn.Op, error) {
 		maxAttempt = attempt
 		ops := []txn.Op{{
@@ -246,4 +249,89 @@ func (s *txnSuite) TestTransientFailure(c *gc.C) {
 	var found simpleDoc
 	err = s.collection.FindId("1").One(&found)
 	c.Assert(found, gc.DeepEquals, doc)
+}
+
+func (s *txnSuite) TestRunFailureIntermittentUnexpectedMessage(c *gc.C) {
+	runner := jujutxn.NewRunner(jujutxn.RunnerParams{})
+	fake := &fakeRunner{errors: []error{errors.New("unexpected message")}}
+	jujutxn.SetRunnerFunc(runner, fake.new)
+	tries := 0
+	// Doesn't matter what this returns as long as it isn't an error.
+	buildTxn := func(attempt int) ([]txn.Op, error) {
+		tries++
+		return nil, nil
+	}
+	err := runner.Run(buildTxn)
+	c.Check(err, gc.Equals, nil)
+	c.Check(tries, gc.Equals, 2)
+}
+
+func (s *txnSuite) TestRunFailureAlwaysUnexpectedMessage(c *gc.C) {
+	runner := jujutxn.NewRunner(jujutxn.RunnerParams{})
+	fake := &fakeRunner{errors: []error{
+		errors.New("unexpected message"),
+		errors.New("unexpected message"),
+		errors.New("unexpected message"),
+		errors.New("unexpected message"),
+	}}
+	jujutxn.SetRunnerFunc(runner, fake.new)
+	tries := 0
+	// Doesn't matter what this returns as long as it isn't an error.
+	buildTxn := func(attempt int) ([]txn.Op, error) {
+		tries++
+		return nil, nil
+	}
+	err := runner.Run(buildTxn)
+	c.Check(err, gc.ErrorMatches, "unexpected message")
+	c.Check(tries, gc.Equals, 3)
+}
+
+func (s *txnSuite) TestRunTransactionObserver(c *gc.C) {
+	type args struct {
+		ops []txn.Op
+		err error
+	}
+	var calls []args
+	runner := jujutxn.NewRunner(jujutxn.RunnerParams{
+		RunTransactionObserver: func(ops []txn.Op, err error) {
+			calls = append(calls, args{ops, err})
+		},
+	})
+	fake := &fakeRunner{errors: []error{
+		txn.ErrAborted,
+		nil,
+	}}
+	jujutxn.SetRunnerFunc(runner, fake.new)
+	ops := []txn.Op{{}}
+	buildTxn := func(attempt int) ([]txn.Op, error) {
+		return ops, nil
+	}
+	err := runner.Run(buildTxn)
+	c.Check(err, gc.IsNil)
+	c.Check(calls, gc.HasLen, 2)
+	c.Check(calls[0].ops, gc.DeepEquals, ops)
+	c.Check(calls[0].err, gc.Equals, txn.ErrAborted)
+	c.Check(calls[1].ops, gc.DeepEquals, ops)
+	c.Check(calls[1].err, gc.IsNil)
+}
+
+type fakeRunner struct {
+	jujutxn.TxnRunner
+	errors []error
+}
+
+// Since a new transaction runner is created each time the code
+// is retried, we want to have a single source of errors, so make the
+// fake a factory that returns itself.
+func (f *fakeRunner) new() jujutxn.TxnRunner {
+	return f
+}
+
+func (f *fakeRunner) Run([]txn.Op, bson.ObjectId, interface{}) error {
+	if len(f.errors) == 0 {
+		return nil
+	}
+	err := f.errors[0]
+	f.errors = f.errors[1:]
+	return err
 }

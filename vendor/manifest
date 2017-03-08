@@ -10,8 +10,8 @@
 		{
 			"importpath": "github.com/juju/txn",
 			"repository": "https://github.com/juju/txn",
-			"revision": "b03989258907be2865c107c0ec93d079add3d7bb",
-			"branch": "HEAD"
+			"revision": "28898197906200d603394d8e4ce537436529f1c5",
+			"branch": "master"
 		},
 		{
 			"importpath": "gopkg.in/check.v1",

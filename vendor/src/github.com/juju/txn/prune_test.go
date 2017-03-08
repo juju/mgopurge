@@ -7,7 +7,7 @@ import (
 	"time"
 
 	"github.com/juju/loggo"
-	jujutesting "github.com/juju/testing"
+	"github.com/juju/testing"
 	jc "github.com/juju/testing/checkers"
 	gc "gopkg.in/check.v1"
 	"gopkg.in/mgo.v2"
@@ -18,7 +18,8 @@ import (
 )
 
 type PruneSuite struct {
-	jujutesting.MgoSuite
+	testing.IsolationSuite
+	testing.MgoSuite
 	db     *mgo.Database
 	txns   *mgo.Collection
 	runner *txn.Runner
@@ -26,7 +27,19 @@ type PruneSuite struct {
 
 var _ = gc.Suite(&PruneSuite{})
 
+func (s *PruneSuite) SetUpSuite(c *gc.C) {
+	s.IsolationSuite.SetUpSuite(c)
+	s.MgoSuite.SetUpSuite(c)
+}
+
+func (s *PruneSuite) TearDownSuite(c *gc.C) {
+	txn.SetChaos(txn.Chaos{})
+	s.MgoSuite.TearDownSuite(c)
+	s.IsolationSuite.TearDownSuite(c)
+}
+
 func (s *PruneSuite) SetUpTest(c *gc.C) {
+	s.IsolationSuite.SetUpTest(c)
 	s.MgoSuite.SetUpTest(c)
 	txn.SetChaos(txn.Chaos{})
 
@@ -35,9 +48,9 @@ func (s *PruneSuite) SetUpTest(c *gc.C) {
 	s.runner = txn.NewRunner(s.txns)
 }
 
-func (s *PruneSuite) TearDownSuite(c *gc.C) {
-	txn.SetChaos(txn.Chaos{})
-	s.MgoSuite.TearDownSuite(c)
+func (s *PruneSuite) TearDownTest(c *gc.C) {
+	s.MgoSuite.TearDownTest(c)
+	s.IsolationSuite.TearDownTest(c)
 }
 
 func (s *PruneSuite) maybePrune(c *gc.C, pruneFactor float32) {
@@ -385,7 +398,7 @@ func (s *PruneSuite) TestPruningStatsBrokenLastPointer(c *gc.C) {
 	c.Assert(err, jc.ErrorIsNil)
 
 	var tw loggo.TestWriter
-	c.Assert(loggo.RegisterWriter("test", &tw, loggo.WARNING), gc.IsNil)
+	c.Assert(loggo.RegisterWriter("test", loggo.NewMinimumLevelWriter(&tw, loggo.WARNING)), gc.IsNil)
 	defer loggo.RemoveWriter("test")
 
 	// Pruning should occur when "last" pointer is broken.
