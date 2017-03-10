@@ -37,6 +37,7 @@ See `./mgopurge --help` for further information.
 ## Building
 
 This project uses [gb] to manage its dependencies. In order to build
-mgopurge, install `gb` then run ` gb build`.
+mgopurge, install `gb` then run `make`. In order to build a version
+for release run `make release`.
 
 [gb]: https://getgb.io/
