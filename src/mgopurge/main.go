@@ -1,6 +1,8 @@
 // Copyright 2016 Canonical Ltd.
 // Licensed under the AGPLv3, see LICENCE file for details.
 
+//go:generate bash -c "./gen_version.sh > version.go"
+
 package main
 
 import (
@@ -180,8 +182,14 @@ func commandLine() commandLineArgs {
 		"skip compacting of database")
 	noResume := flags.Bool("no-resume", false,
 		"skip reprocessing of incomplete transactions")
+	showVersion := flags.Bool("version", false, "show version")
 
 	flags.Parse(os.Args[1:])
+
+	if *showVersion {
+		fmt.Fprintf(os.Stderr, "%s\n", version)
+		os.Exit(0)
+	}
 
 	if a.password == "" && a.username != "" {
 		fmt.Fprintf(os.Stderr, "error: -password must be used if username is provided\n")
