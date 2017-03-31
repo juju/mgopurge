@@ -58,6 +58,12 @@ var allStages = []stage{
 			return FixMachinesTxnQueue(db.C(machinesC), txns)
 		},
 	}, {
+		"prunequeues",
+		"Remove references to completed transactions in all collections",
+		func(db *mgo.Database, txns *mgo.Collection) error {
+			return PruneAllCollectionQueues(db, txns)
+		},
+	}, {
 		"prune",
 		"Prune unreferenced transactions",
 		func(db *mgo.Database, txns *mgo.Collection) error {
