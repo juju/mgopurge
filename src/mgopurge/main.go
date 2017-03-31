@@ -30,10 +30,10 @@ related problems in a Juju database. Casual use is strongly
 discouraged. Irreversible damage may be caused to a Juju deployment
 through improper use of this tool.
 
-This program should not be run while any Juju controller machine
-agents are running.
+Aside from limited cases, this program should not be run while Juju
+controller machine agents are running.
 
-Have all controller machine agents been shut down?`[1:]
+Ok to proceed?`[1:]
 
 // allStages defines all of mgopurge's stages. As some stages must be
 // run before others, the ordering is important.
