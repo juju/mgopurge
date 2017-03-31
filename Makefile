@@ -1,6 +1,7 @@
 build: generate
 	gb build
 
+# Remember to create annotated tag first. E.g. git tag -a v1.2
 release: clean check-clean generate
 	gb build -f
 
