@@ -80,7 +80,10 @@ func CollectionsToPruneQueues(db *mgo.Database, txnsName string) ([]string, erro
 		include := true
 		switch {
 		case name == txnsName+".stash":
-			include = true
+			// We don't include pruning txns.stash entries because those are
+			// things that should really not be considered completed, if they
+			// are in the stash they are going to be deleted or created
+			include = false
 		case name == txnsName, strings.HasPrefix(name, txnsName+"."):
 			// Don't look in things other than txns.stash that are related to txns
 			include = false
