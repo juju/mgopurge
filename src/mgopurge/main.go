@@ -35,6 +35,49 @@ agents are running.
 
 Have all controller machine agents been shut down?`[1:]
 
+// allStages defines all of mgopurge's stages. As some stages must be
+// run before others, the ordering is important.
+var allStages = []stage{
+	{
+		"apihostports",
+		"Repair runaway transactions for apiHostPorts document",
+		func(db *mgo.Database, txns *mgo.Collection) error {
+			return FixApiHostPorts(db, txns)
+		},
+	}, {
+		"purgemissing",
+		"Purge orphaned transactions",
+		func(db *mgo.Database, txns *mgo.Collection) error {
+			collections := getAllPurgeableCollections(db)
+			return PurgeMissing(txns, db.C(txnsStashC), collections...)
+		},
+	}, {
+		"machines",
+		"Remove references to completed transactions in machines collection",
+		func(db *mgo.Database, txns *mgo.Collection) error {
+			return FixMachinesTxnQueue(db.C(machinesC), txns)
+		},
+	}, {
+		"prune",
+		"Prune unreferenced transactions",
+		func(db *mgo.Database, txns *mgo.Collection) error {
+			return jujutxn.PruneTxns(db, txns)
+		},
+	}, {
+		"compact",
+		"Compact database to release disk space",
+		func(db *mgo.Database, txns *mgo.Collection) error {
+			return db.Run(bson.M{"repairDatabase": 1}, nil)
+		},
+	}, {
+		"resume",
+		"Resume incompleted transactions",
+		func(db *mgo.Database, txns *mgo.Collection) error {
+			return db.Run(bson.M{"repairDatabase": 1}, nil)
+		},
+	},
+}
+
 func main() {
 	checkErr("setupLogging", setupLogging())
 	args := commandLine()
@@ -47,43 +90,22 @@ func main() {
 	checkErr("Dial", err)
 
 	db := session.DB("juju")
-	collections := getAllPurgeableCollections(db)
 	txns := db.C(txnsC)
-
-	logger.Infof("Repairing runaway transactions for apiHostPorts document...")
-	err = FixApiHostPorts(db, txns)
-	checkErr("FixApiHostPorts", err)
-
-	logger.Infof("Purging orphaned transactions for %d juju collections...\n", len(collections))
-	err = PurgeMissing(txns, db.C(txnsStashC), collections...)
-	checkErr("PurgeMissing", err)
-	logger.Infof("Done compacting orphaned transactions.")
-
-	if args.doMachines {
-		logger.Infof("Removing references to completed transactions in machines collection...")
-		err = FixMachinesTxnQueue(db.C(machinesC), txns)
-		checkErr("FixMachinesTxnQueue", err)
+	for _, stage := range args.stages {
+		stage.Run(db, txns)
 	}
+}
 
-	if args.doPrune {
-		logger.Infof("Pruning unreferenced transactions...")
-		err = jujutxn.PruneTxns(db, txns)
-		checkErr("PruneTxns", err)
-	}
+type stage struct {
+	label string
+	desc  string
+	run   func(*mgo.Database, *mgo.Collection) error
+}
 
-	if args.doCompact {
-		logger.Infof("Compacting database to release disk space...")
-		err = db.Run(bson.M{"repairDatabase": 1}, nil)
-		checkErr("repairDatabase", err)
-	}
-
-	if args.doResume {
-		logger.Infof("Resuming transactions...")
-		if err := ResumeAll(db.C(txnsC)); err != nil {
-			checkErr("ResumeAll", err)
-		}
-		logger.Infof("Resuming done")
-	}
+func (s *stage) Run(db *mgo.Database, txns *mgo.Collection) {
+	logger.Infof("Running stage %q: %s", s.label, s.desc)
+	err := s.run(db, txns)
+	checkErr("failed stage "+s.label, err)
 }
 
 func promptYN(question string) bool {
@@ -148,16 +170,13 @@ func checkErr(label string, err error) {
 }
 
 type commandLineArgs struct {
-	hostname   string
-	port       string
-	ssl        bool
-	username   string
-	password   string
-	doPrompt   bool
-	doMachines bool
-	doPrune    bool
-	doCompact  bool
-	doResume   bool
+	hostname string
+	port     string
+	ssl      bool
+	username string
+	password string
+	stages   []stage
+	doPrompt bool
 }
 
 func commandLine() commandLineArgs {
@@ -173,15 +192,11 @@ func commandLine() commandLineArgs {
 		"user for connecting to MonogDB (use \"\" to for no authentication)")
 	flags.StringVar(&a.password, "password", "",
 		"password for connecting to MonogDB")
+	var rawStages string
+	flags.StringVar(&rawStages, "stages", "",
+		"comma separated list of stages to run (default is to run all)")
+	listStagesFlag := flags.Bool("list", false, "list available execution stages")
 	yes := flags.Bool("yes", false, "answer 'yes' to prompts")
-	noMachines := flags.Bool("no-machines", false,
-		"skip removal of completed txn-queue entries from machines collection")
-	noPrune := flags.Bool("no-prune", false,
-		"skip pruning of completed transactions")
-	noCompact := flags.Bool("no-compact", false,
-		"skip compacting of database")
-	noResume := flags.Bool("no-resume", false,
-		"skip reprocessing of incomplete transactions")
 	showVersion := flags.Bool("version", false, "show version")
 
 	flags.Parse(os.Args[1:])
@@ -191,16 +206,52 @@ func commandLine() commandLineArgs {
 		os.Exit(0)
 	}
 
+	if *listStagesFlag {
+		listStages()
+		os.Exit(0)
+	}
+
 	if a.password == "" && a.username != "" {
 		fmt.Fprintf(os.Stderr, "error: -password must be used if username is provided\n")
 		os.Exit(2)
 	}
 	a.doPrompt = !*yes
-	a.doMachines = !*noMachines
-	a.doPrune = !*noPrune
-	a.doCompact = !*noCompact
-	a.doResume = !*noResume
+
+	if rawStages == "" {
+		// No stages selected. Run all.
+		for _, stage := range allStages {
+			a.stages = append(a.stages, stage)
+		}
+	} else {
+		// Specific stages selected.
+		selected := make(map[string]bool)
+		for _, s := range strings.Split(rawStages, ",") {
+			selected[strings.TrimSpace(s)] = true
+		}
+		for _, stage := range allStages {
+			if selected[stage.label] {
+				a.stages = append(a.stages, stage)
+				delete(selected, stage.label)
+			}
+		}
+		if len(selected) > 0 {
+			// There were invalid stages selected
+			var invalid []string
+			for s := range selected {
+				invalid = append(invalid, s)
+			}
+			fmt.Fprintf(os.Stderr, "error: invalid stages selected: %s\n", strings.Join(invalid, ","))
+			os.Exit(2)
+		}
+	}
+
 	return a
+}
+
+func listStages() {
+	for _, stage := range allStages {
+		fmt.Printf("%s: %s\n", stage.label, stage.desc)
+	}
 }
 
 func isPurgeableCollection(name string) bool {
