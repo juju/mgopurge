@@ -5,17 +5,28 @@ package txn
 
 import (
 	"fmt"
+	"strings"
 	"time"
 
 	"gopkg.in/mgo.v2"
 	"gopkg.in/mgo.v2/bson"
-	"gopkg.in/mgo.v2/txn"
 )
 
-// Transaction states copied From mgo/txn.
 const (
+	// Transaction states copied from mgo/txn.
 	taborted = 5 // Pre-conditions failed, nothing done
 	tapplied = 6 // All changes applied
+
+	// maxBatchDocs defines the maximum MongoDB batch size.
+	maxBatchDocs = 1616
+
+	// maxBulkOps defines the maximum number of operations in a bulk
+	// operation.
+	maxBulkOps = 1000
+
+	// logInterval defines often to report progress during long
+	// operations.
+	logInterval = 15 * time.Second
 )
 
 type pruneStats struct {
@@ -40,7 +51,7 @@ func maybePrune(db *mgo.Database, txnsName string, pruneFactor float32) error {
 	}
 
 	required := lastTxnsCount == 0 || float32(txnsCount) >= float32(lastTxnsCount)*pruneFactor
-	logger.Infof("txns after last prune: %d, txns now = %d, pruning required: %v", lastTxnsCount, txnsCount, required)
+	logger.Infof("txns after last prune: %d, txns now: %d, pruning required: %v", lastTxnsCount, txnsCount, required)
 
 	if required {
 		started := time.Now()
@@ -54,7 +65,7 @@ func maybePrune(db *mgo.Database, txnsName string, pruneFactor float32) error {
 		if err != nil {
 			return fmt.Errorf("failed to retrieve final txns count: %v", err)
 		}
-		logger.Infof("txn pruning complete. txns now = %d", txnsCountAfter)
+		logger.Infof("txn pruning complete. txns now: %d", txnsCountAfter)
 		return writePruneTxnsCount(txnsPrune, started, completed, txnsCount, txnsCountAfter)
 	}
 
@@ -129,74 +140,130 @@ func txnsPruneC(txnsName string) string {
 // with a bit of luck something like this will one day be part of
 // mgo/txn.
 func PruneTxns(db *mgo.Database, txns *mgo.Collection) error {
-	present := struct{}{}
+	workingSetName := txns.Name + ".prunetemp"
+	workingSet := db.C(workingSetName)
+	defer workingSet.DropCollection()
 
-	// Load the ids of all completed txns and all collections
-	// referred to by those txns.
-	//
-	// This set could potentially contain many entries, however even
-	// 500,000 entries requires only ~44MB of memory. Given that the
-	// memory hit is short-lived this is probably acceptable.
-	txnIds := make(map[bson.ObjectId]struct{})
-	collNames := make(map[string]struct{})
-
-	var txnDoc struct {
-		Id  bson.ObjectId `bson:"_id"`
-		Ops []txn.Op      `bson:"o"`
-	}
-
+	// Load the ids of all completed and aborted txns into a separate
+	// temporary collection.
 	logger.Debugf("loading all completed transactions")
-	completed := bson.M{
-		"s": bson.M{"$in": []int{taborted, tapplied}},
+	pipe := txns.Pipe([]bson.M{
+		// This used to use $in but that's much slower than $gte.
+		{"$match": bson.M{"s": bson.M{"$gte": taborted}}},
+		{"$project": bson.M{"_id": 1}},
+		{"$out": workingSetName},
+	})
+	pipe.Batch(maxBatchDocs)
+	pipe.AllowDiskUse()
+	if err := pipe.All(&bson.D{}); err != nil {
+		return fmt.Errorf("reading completed txns: %v", err)
 	}
-	iter := txns.Find(completed).Select(bson.M{"_id": 1, "o": 1}).Iter()
-	for iter.Next(&txnDoc) {
-		txnIds[txnDoc.Id] = present
-		for _, op := range txnDoc.Ops {
-			collNames[op.C] = present
-		}
-	}
-	if err := iter.Close(); err != nil {
-		return fmt.Errorf("failed to read all txns: %v", err)
-	}
-	logger.Debugf("found %d completed transactions across %d collections",
-		len(txnIds), len(collNames))
 
-	// Transactions may also be referenced in the stash.
-	collNames["txns.stash"] = present
+	count, err := workingSet.Count()
+	if err != nil {
+		return fmt.Errorf("getting txn count: %v", err)
+	}
+	logger.Debugf("%d completed txns found", count)
 
-	// Now remove the txn ids referenced by all documents in all
-	// txn using collections from the set of known txn ids.
+	collNames, err := db.CollectionNames()
+	if err != nil {
+		return fmt.Errorf("reading collection names: %v", err)
+	}
+	collNames = txnCollections(collNames, txns.Name)
+	logger.Debugf("%d collections with txns to examine", len(collNames))
+
+	// Now remove the txn ids referenced by any document in any
+	// txn-using collection from the set of known txn ids.
 	//
 	// Working the other way - starting with the set of txns
 	// referenced by documents and then removing any not in that set
 	// from the txns collection - is unsafe as it will result in the
-	// removal of transactions run while pruning executes.
-	//
-	for collName := range collNames {
-		logger.Tracef("checking %s for transaction references", collName)
+	// removal of transactions created during the pruning process.
+	t := newSimpleTimer(logInterval)
+	remover := newBulkRemover(workingSet)
+	for _, collName := range collNames {
+		logger.Tracef("checking %s for txn references", collName)
 		coll := db.C(collName)
 		var tDoc struct {
 			Queue []string `bson:"txn-queue"`
 		}
-		iter := coll.Find(nil).Select(bson.M{"txn-queue": 1}).Iter()
+		query := coll.Find(nil).Select(bson.M{"txn-queue": 1})
+		query.Batch(maxBatchDocs)
+		iter := query.Iter()
 		for iter.Next(&tDoc) {
 			for _, token := range tDoc.Queue {
-				delete(txnIds, txnTokenToId(token))
+				if err := remover.remove(txnTokenToId(token)); err != nil {
+					return fmt.Errorf("handling completed txns: %v", err)
+				}
+				if t.isAfter() {
+					logger.Debugf("%d referenced txns found so far", remover.removed)
+				}
 			}
 		}
 		if err := iter.Close(); err != nil {
 			return fmt.Errorf("failed to read docs: %v", err)
 		}
 	}
-
-	// Remove the unreferenced transactions.
-	logger.Debugf("%d transactions to remove", len(txnIds))
-	if err := bulkRemoveTxns(txns, txnIds); err != nil {
-		return fmt.Errorf("txn removal failed: %v", err)
+	if err := remover.flush(); err != nil {
+		return fmt.Errorf("handling completed txns: %v", err)
 	}
-	logger.Debugf("completed transactions pruned")
+	logger.Debugf("%d txns are still referenced and will be kept", remover.removed)
+
+	// Remove the no-longer-referenced transactions from the txns collection.
+	t = newSimpleTimer(logInterval)
+	remover = newBulkRemover(txns)
+	query := workingSet.Find(nil).Batch(maxBatchDocs)
+	iter := query.Iter()
+	var doc struct {
+		ID bson.ObjectId `bson:"_id"`
+	}
+	for iter.Next(&doc) {
+		if err := remover.remove(doc.ID); err != nil {
+			return fmt.Errorf("removing txns: %v", err)
+		}
+		if t.isAfter() {
+			logger.Debugf("%d completed txns pruned so far", remover.removed)
+		}
+	}
+	if err := remover.flush(); err != nil {
+		return fmt.Errorf("removing txns: %v", err)
+	}
+	if err := iter.Close(); err != nil {
+		return fmt.Errorf("iterating through unreferenced txns: %v", err)
+	}
+
+	logger.Debugf("pruning completed: removed %d txns", remover.removed)
 	return nil
+}
+
+// txnCollections takes the list of all collections in a database and
+// filters them to just the ones that may have txn references.
+func txnCollections(inNames []string, txnsName string) []string {
+	// hasTxnReferences returns true if a collection may have
+	// references to txns.
+	hasTxnReferences := func(name string) bool {
+		switch {
+		case name == txnsName+".stash":
+			return true // Need to look in the stash.
+		case name == txnsName, strings.HasPrefix(name, txnsName+"."):
+			// The txns collection and its childen shouldn't be considered.
+			return false
+		case strings.HasPrefix(name, "system."):
+			// Don't look in system collections.
+			return false
+		default:
+			// Everything else needs to be considered.
+			return true
+		}
+	}
+
+	outNames := make([]string, 0, len(inNames))
+	for _, name := range inNames {
+		if hasTxnReferences(name) {
+			outNames = append(outNames, name)
+		}
+	}
+	return outNames
 }
 
 func txnTokenToId(token string) bson.ObjectId {
@@ -205,46 +272,67 @@ func txnTokenToId(token string) bson.ObjectId {
 	return bson.ObjectIdHex(token[:24])
 }
 
-// bulkRemoveTxns removes transaction documents in chunks. It should
-// be significantly more efficient than removing one document per
-// remove query while also not trigger query document size limits.
-func bulkRemoveTxns(txns *mgo.Collection, txnIds map[bson.ObjectId]struct{}) error {
-	removeCount := 0
-	removeTxns := func(ids []bson.ObjectId) error {
-		bulk := txns.Bulk()
-		bulk.Unordered()
-		for _, id := range ids {
-			bulk.Remove(bson.D{{"_id", id}})
-		}
-		switch _, err := bulk.Run(); err {
-		case nil, mgo.ErrNotFound:
-			// It's OK for txns to no longer exist. Another process
-			// may have concurrently pruned them.
-			removeCount += len(ids)
-			logger.Tracef("%d completed transactions removed", removeCount)
-			return nil
-		default:
-			return err
-		}
-	}
+func newBulkRemover(coll *mgo.Collection) *bulkRemover {
+	r := &bulkRemover{coll: coll}
+	r.newChunk()
+	return r
+}
 
-	// There must not be more than 1000 operations in a bulk operation.
-	const chunkSize = 1000
-	chunk := make([]bson.ObjectId, 0, chunkSize)
-	for txnId := range txnIds {
-		chunk = append(chunk, txnId)
-		if len(chunk) == chunkSize {
-			if err := removeTxns(chunk); err != nil {
-				return err
-			}
-			chunk = chunk[:0] // Avoid reallocation.
-		}
-	}
-	if len(chunk) > 0 {
-		if err := removeTxns(chunk); err != nil {
-			return err
-		}
-	}
+type bulkRemover struct {
+	coll      *mgo.Collection
+	chunk     *mgo.Bulk
+	chunkSize int
+	removed   int
+}
 
+func (r *bulkRemover) newChunk() {
+	r.chunk = r.coll.Bulk()
+	r.chunk.Unordered()
+	r.chunkSize = 0
+}
+
+func (r *bulkRemover) remove(id interface{}) error {
+	r.chunk.Remove(bson.D{{"_id", id}})
+	r.chunkSize++
+	if r.chunkSize >= maxBulkOps {
+		return r.flush()
+	}
 	return nil
+}
+
+func (r *bulkRemover) flush() error {
+	if r.chunkSize < 1 {
+		return nil // Nothing to do
+	}
+	switch result, err := r.chunk.Run(); err {
+	case nil, mgo.ErrNotFound:
+		// It's OK for txns to no longer exist. Another process
+		// may have concurrently pruned them.
+		r.removed += result.Matched
+		r.newChunk()
+		return nil
+	default:
+		return err
+	}
+}
+
+func newSimpleTimer(interval time.Duration) *simpleTimer {
+	return &simpleTimer{
+		interval: interval,
+		next:     time.Now().Add(interval),
+	}
+}
+
+type simpleTimer struct {
+	interval time.Duration
+	next     time.Time
+}
+
+func (t *simpleTimer) isAfter() bool {
+	now := time.Now()
+	if now.After(t.next) {
+		t.next = now.Add(t.interval)
+		return true
+	}
+	return false
 }
