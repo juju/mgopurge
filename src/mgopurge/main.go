@@ -73,7 +73,7 @@ var allStages = []stage{
 		"resume",
 		"Resume incompleted transactions",
 		func(db *mgo.Database, txns *mgo.Collection) error {
-			return db.Run(bson.M{"repairDatabase": 1}, nil)
+			return ResumeAll(txns)
 		},
 	},
 }
