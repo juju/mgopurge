@@ -16,7 +16,6 @@ import (
 
 	jujutxn "github.com/juju/txn"
 	"gopkg.in/mgo.v2"
-	"gopkg.in/mgo.v2/bson"
 	"gopkg.in/mgo.v2/txn"
 )
 
@@ -73,9 +72,9 @@ var allStages = []stage{
 		},
 	}, {
 		"compact",
-		"Compact database to release disk space",
-		func(db *mgo.Database, txns *mgo.Collection) error {
-			return db.Run(bson.M{"repairDatabase": 1}, nil)
+		"Compact database to release disk space (does not compact replicas)",
+		func(db *mgo.Database, _ *mgo.Collection) error {
+			return compact(db)
 		},
 	}, {
 		"resume",
