@@ -10,7 +10,7 @@
 		{
 			"importpath": "github.com/juju/txn",
 			"repository": "https://github.com/juju/txn",
-			"revision": "b0486f90a44540ef9a5cfc9f3fad904832e954fe",
+			"revision": "aeb0c962db9bb5ae5705d7466e500ed8926b0f53",
 			"branch": "master"
 		},
 		{

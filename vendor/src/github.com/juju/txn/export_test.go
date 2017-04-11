@@ -3,6 +3,10 @@
 
 package txn
 
+import (
+	"gopkg.in/mgo.v2"
+)
+
 type TxnRunner txnRunner
 
 // Specify the function that creates the txnRunner for testing.
@@ -11,4 +15,19 @@ func SetRunnerFunc(r Runner, f func() TxnRunner) {
 	inner.newRunner = func() txnRunner {
 		return f()
 	}
+}
+
+var CheckMongoSupportsOut = checkMongoSupportsOut
+
+// NewDBOracleNoOut is only used for testing. It forces the DBOracle to not ask
+// mongo to populate the working set in the aggregation pipeline, which is our
+// compatibility code for older mongo versions.
+func NewDBOracleNoOut(db *mgo.Database, txns *mgo.Collection) (*DBOracle, func(), error) {
+	oracle := &DBOracle{
+		db:            db,
+		txns:          txns,
+		usingMongoOut: false,
+	}
+	cleanup, err := oracle.prepare()
+	return oracle, cleanup, err
 }
