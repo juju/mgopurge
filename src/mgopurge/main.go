@@ -39,6 +39,14 @@ Ok to proceed?`[1:]
 // run before others, the ordering is important.
 var allStages = []stage{
 	{
+		"presence",
+		"Clear presence data. This will be recreated when the controllers restart.",
+		func(db *mgo.Database, _ *mgo.Collection) error {
+			presenceDB := db.Session.DB("presence")
+			err := presenceDB.DropDatabase()
+			return err
+		},
+	}, {
 		"apihostports",
 		"Repair runaway transactions for apiHostPorts document",
 		func(db *mgo.Database, txns *mgo.Collection) error {
@@ -71,7 +79,7 @@ var allStages = []stage{
 		},
 	}, {
 		"resume",
-		"Resume incompleted transactions",
+		"Resume incomplete transactions",
 		func(db *mgo.Database, txns *mgo.Collection) error {
 			return ResumeAll(txns)
 		},
