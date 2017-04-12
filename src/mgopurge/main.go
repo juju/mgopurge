@@ -59,16 +59,10 @@ var allStages = []stage{
 			return PurgeMissing(txns, db.C(txnsStashC), collections...)
 		},
 	}, {
-		"machines",
-		"Remove references to completed transactions in machines collection",
-		func(db *mgo.Database, txns *mgo.Collection) error {
-			return FixMachinesTxnQueue(db.C(machinesC), txns)
-		},
-	}, {
 		"prune",
 		"Prune unreferenced transactions",
 		func(db *mgo.Database, txns *mgo.Collection) error {
-			return jujutxn.PruneTxns(db, txns)
+			return jujutxn.CleanAndPrune(db, txns, -1)
 		},
 	}, {
 		"compact",

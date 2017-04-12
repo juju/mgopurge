@@ -54,6 +54,19 @@ var (
 // TransactionSource defines a function that can return transaction operations to run.
 type TransactionSource func(attempt int) ([]txn.Op, error)
 
+// PruneOptions controls when we will trigger a database prune.
+type PruneOptions struct {
+	// PruneFactor will trigger a prune when the current count of
+	// transactions in the database is greater than old*PruneFactor
+	PruneFactor float32
+	// MinNewTransactions will skip a prune even if pruneFactor is true
+	// if there are less than MinNewTransactions that might be cleaned up.
+	MinNewTransactions int
+	// MaxNewTransactions will force a prune if it sees more than
+	// MaxNewTransactions since the last run.
+	MaxNewTransactions int
+}
+
 // Runner instances applies operations to collections in a database.
 type Runner interface {
 	// RunTransaction applies the specified transaction operations to a database.
@@ -75,7 +88,7 @@ type Runner interface {
 	//
 	//   txn_count >= pruneFactor * txn_count_at_last_prune
 	//
-	MaybePruneTransactions(pruneFactor float32) error
+	MaybePruneTransactions(pruneOpts PruneOptions) error
 }
 
 type txnRunner interface {
@@ -153,7 +166,7 @@ func (tr *transactionRunner) Run(transactions TransactionSource) error {
 		if err == ErrTransientFailure {
 			continue
 		}
-		if err == ErrNoOperations {
+		if err == ErrNoOperations || len(ops) == 0{
 			return nil
 		}
 		if err != nil {
@@ -214,8 +227,8 @@ func (tr *transactionRunner) ResumeTransactions() error {
 }
 
 // MaybePruneTransactions is defined on Runner.
-func (tr *transactionRunner) MaybePruneTransactions(pruneFactor float32) error {
-	return maybePrune(tr.db, tr.transactionCollectionName, pruneFactor)
+func (tr *transactionRunner) MaybePruneTransactions(pruneOpts PruneOptions) error {
+	return maybePrune(tr.db, tr.transactionCollectionName, pruneOpts)
 }
 
 // TestHook holds a pair of functions to be called before and after a
