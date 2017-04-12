@@ -46,12 +46,6 @@ var allStages = []stage{
 			return err
 		},
 	}, {
-		"apihostports",
-		"Repair runaway transactions for apiHostPorts document",
-		func(db *mgo.Database, txns *mgo.Collection) error {
-			return FixApiHostPorts(db, txns)
-		},
-	}, {
 		"purgemissing",
 		"Purge orphaned transactions",
 		func(db *mgo.Database, txns *mgo.Collection) error {
