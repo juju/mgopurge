@@ -60,7 +60,7 @@ var allStages = []stage{
 		},
 	}, {
 		"prune",
-		"Prune unreferenced transactions",
+		"Prune finalised transactions",
 		func(db *mgo.Database, txns *mgo.Collection) error {
 			return jujutxn.CleanAndPrune(db, txns, -1)
 		},
