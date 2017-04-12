@@ -53,6 +53,12 @@ var allStages = []stage{
 			return PurgeMissing(txns, db.C(txnsStashC), collections...)
 		},
 	}, {
+		"resume",
+		"Resume incomplete transactions",
+		func(db *mgo.Database, txns *mgo.Collection) error {
+			return ResumeAll(txns)
+		},
+	}, {
 		"prune",
 		"Prune unreferenced transactions",
 		func(db *mgo.Database, txns *mgo.Collection) error {
@@ -63,12 +69,6 @@ var allStages = []stage{
 		"Compact database to release disk space (does not compact replicas)",
 		func(db *mgo.Database, _ *mgo.Collection) error {
 			return compact(db)
-		},
-	}, {
-		"resume",
-		"Resume incomplete transactions",
-		func(db *mgo.Database, txns *mgo.Collection) error {
-			return ResumeAll(txns)
 		},
 	},
 }
