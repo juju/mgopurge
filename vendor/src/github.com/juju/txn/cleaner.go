@@ -266,20 +266,20 @@ func (cleaner *collectionCleaner) flushRemoveQueue() error {
 	if len(cleaner.docIdsToRemove) == 0 {
 		return nil
 	}
-	remover := newBulkRemover(cleaner.config.Source)
+	remover := newBatchRemover(cleaner.config.Source)
 	for _, docId := range cleaner.docIdsToRemove {
-		if err := remover.remove(docId); err != nil {
+		if err := remover.Remove(docId); err != nil {
 			return fmt.Errorf("failed while removing document %v from %q",
 				docId, cleaner.config.Source.Name)
 		}
 	}
-	if err := remover.flush(); err != nil {
+	if err := remover.Flush(); err != nil {
 		return fmt.Errorf("failed while removing documents from %q",
 			cleaner.config.Source.Name)
 	}
-	cleaner.stats.RemovedCount += remover.removed
+	cleaner.stats.RemovedCount += remover.Removed()
 	logger.Debugf("flushing %d documents removed %d (%d total)",
-		len(cleaner.docIdsToRemove), remover.removed, cleaner.stats.RemovedCount)
+		len(cleaner.docIdsToRemove), remover.Removed(), cleaner.stats.RemovedCount)
 	cleaner.docIdsToRemove = cleaner.docIdsToRemove[:0]
 	return nil
 }
@@ -354,8 +354,8 @@ func (cleaner *collectionCleaner) Cleanup() error {
 	return nil
 }
 
-// CleanupStash goes through the txns.stash and removes documents that are no longer needed.
-func CleanupStash(db *mgo.Database, oracle Oracle, txnsStash *mgo.Collection) error {
+// cleanupStash goes through the txns.stash and removes documents that are no longer needed.
+func cleanupStash(db *mgo.Database, oracle Oracle, txnsStash *mgo.Collection, stats *CleanupStats) error {
 	cleaner := NewStashCleaner(CollectionConfig{
 		Oracle:         oracle,
 		Source:         txnsStash,
@@ -363,5 +363,12 @@ func CleanupStash(db *mgo.Database, oracle Oracle, txnsStash *mgo.Collection) er
 		MaxRemoveQueue: maxMemoryTokens,
 		LogInterval:    logInterval,
 	})
-	return cleaner.Cleanup()
+	err := cleaner.Cleanup()
+	if stats != nil {
+		stats.CollectionsInspected += 1
+		stats.DocsInspected += cleaner.stats.DocCount
+		stats.StashDocumentsRemoved += cleaner.stats.RemovedCount
+		stats.DocsCleaned += cleaner.stats.UpdatedDocCount
+	}
+	return err
 }

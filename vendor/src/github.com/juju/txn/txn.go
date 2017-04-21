@@ -166,11 +166,15 @@ func (tr *transactionRunner) Run(transactions TransactionSource) error {
 		if err == ErrTransientFailure {
 			continue
 		}
-		if err == ErrNoOperations || len(ops) == 0{
+		if err == ErrNoOperations {
 			return nil
 		}
 		if err != nil {
 			return err
+		}
+		if len(ops) == 0 {
+			// Treat this the same as ErrNoOperations but don't suppress other errors.
+			return nil
 		}
 		if err := tr.RunTransaction(ops); err == nil {
 			return nil
