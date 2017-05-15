@@ -125,12 +125,14 @@ func maybePrune(db *mgo.Database, txnsName string, pruneOpts PruneOptions) error
 	}
 
 	required, rationale := shouldPrune(lastTxnsCount, txnsCount, pruneOpts)
-	logger.Infof("txns after last prune: %d, txns now: %d, pruning required: %v %s",
-		lastTxnsCount, txnsCount, required, rationale)
 
 	if !required {
+		logger.Infof("txns after last prune: %d, txns now: %d, not pruning: %s",
+			lastTxnsCount, txnsCount, rationale)
 		return nil
 	}
+	logger.Infof("txns after last prune: %d, txns now: %d, pruning: %s",
+		lastTxnsCount, txnsCount, rationale)
 	started := time.Now()
 
 	stashDocsBefore, err := txnsStash.Count()
@@ -138,7 +140,7 @@ func maybePrune(db *mgo.Database, txnsName string, pruneOpts PruneOptions) error
 		return fmt.Errorf("failed to retrieve starting %q count: %v", txnsStashName, err)
 	}
 
-	err = CleanAndPrune(db, txns, txnsCount)
+	stats, err := CleanAndPrune(db, txns, txnsCount)
 	completed := time.Now()
 
 	txnsCountAfter, err := txns.Count()
@@ -149,43 +151,66 @@ func maybePrune(db *mgo.Database, txnsName string, pruneOpts PruneOptions) error
 	if err != nil {
 		return fmt.Errorf("failed to retrieve final %q count: %v", txnsStashName, err)
 	}
-	logger.Infof("txn pruning complete. txns now: %d", txnsCountAfter)
+	elapsed := time.Since(started)
+	logger.Infof("txn pruning complete after %v. txns now: %d, inspected %d collections, %d docs (%d cleaned)\n   removed %d stash docs and %d txn docs",
+		elapsed, txnsCountAfter, stats.CollectionsInspected, stats.DocsInspected, stats.DocsCleaned, stats.StashDocumentsRemoved, stats.TransactionsRemoved)
 	return writePruneTxnsCount(txnsPrune, started, completed, txnsCount, txnsCountAfter,
 		stashDocsBefore, stashDocsAfter)
 
 	return nil
 }
 
+// CleanupStats gives some numbers as to what work was done as part of
+// CleanupAndPrune.
+type CleanupStats struct {
+
+	// CollectionsInspected is the total number of collections we looked at for documents
+	CollectionsInspected int
+
+	// DocsInspected is how many documents we loaded to evaluate their txn queues
+	DocsInspected int
+
+	// DocsCleaned is how many documents we Updated to remove entries from their txn queue.
+	DocsCleaned int
+
+	// StashDocumentsRemoved is how many total documents we remove from txns.stash
+	StashDocumentsRemoved int
+
+	// StashDocumentsRemoved is how many documents we remove from txns
+	TransactionsRemoved int
+}
+
 // CleanAndPrune runs the cleanup steps, and then follows up with pruning all
 // of the transactions that are no longer referenced.
-func CleanAndPrune(db *mgo.Database, txns *mgo.Collection, txnsCountHint int) error {
+func CleanAndPrune(db *mgo.Database, txns *mgo.Collection, txnsCountHint int) (CleanupStats, error) {
+	var stats CleanupStats
 	if txnsCountHint <= 0 {
 		txnsCount, err := txns.Count()
 		if err != nil {
-			return err
+			return stats, err
 		}
 		txnsCountHint = txnsCount
 	}
 	oracle, cleanup, err := getOracle(db, txns, txnsCountHint, maxMemoryTokens)
 	defer cleanup()
 	if err != nil {
-		return err
+		return stats, err
 	}
 	txnsStashName := txns.Name + ".stash"
 	txnsStash := db.C(txnsStashName)
 
-	if err := CleanupStash(db, oracle, txnsStash); err != nil {
-		return err
+	if err := cleanupStash(db, oracle, txnsStash, &stats); err != nil {
+		return stats, err
 	}
 
-	if err := CleanupAllCollections(db, oracle, txns.Name); err != nil {
-		return err
+	if err := cleanupAllCollections(db, oracle, txns.Name, &stats); err != nil {
+		return stats, err
 	}
 
-	if err := PruneTxns(db, oracle, txns); err != nil {
-		return err
+	if err := PruneTxns(db, oracle, txns, &stats); err != nil {
+		return stats, err
 	}
-	return nil
+	return stats, nil
 }
 
 // getPruneLastTxnsCount will return how many documents were in 'txns' the
@@ -261,7 +286,7 @@ func txnsPruneC(txnsName string) string {
 // TODO(mjs) - this knows way too much about mgo/txn's internals and
 // with a bit of luck something like this will one day be part of
 // mgo/txn.
-func PruneTxns(db *mgo.Database, oracle Oracle, txns *mgo.Collection) error {
+func PruneTxns(db *mgo.Database, oracle Oracle, txns *mgo.Collection, stats *CleanupStats) error {
 	count := oracle.Count()
 	logger.Debugf("%d completed txns found", count)
 
@@ -293,6 +318,9 @@ func PruneTxns(db *mgo.Database, oracle Oracle, txns *mgo.Collection) error {
 		query.Batch(maxBatchDocs)
 		iter := query.Iter()
 		for iter.Next(&tDoc) {
+			if stats != nil {
+				stats.DocsInspected += 1
+			}
 			for _, token := range tDoc.Queue {
 				txnId := txnTokenToId(token)
 				toRemove = append(toRemove, txnId)
@@ -323,7 +351,12 @@ func PruneTxns(db *mgo.Database, oracle Oracle, txns *mgo.Collection) error {
 
 	// Remove the no-longer-referenced transactions from the txns collection.
 	t = newSimpleTimer(logInterval)
-	remover := newBulkRemover(txns)
+	var remover Remover
+	if checkMongoSupportsOut(db) {
+		remover = newBulkRemover(txns)
+	} else {
+		remover = newBatchRemover(txns)
+	}
 	iter, err := oracle.IterTxns()
 	if err != nil {
 		return err
@@ -331,21 +364,24 @@ func PruneTxns(db *mgo.Database, oracle Oracle, txns *mgo.Collection) error {
 	var loopErr error
 	var txnId bson.ObjectId
 	for txnId, loopErr = iter.Next(); loopErr == nil; txnId, loopErr = iter.Next() {
-		if err := remover.remove(txnId); err != nil {
+		if err := remover.Remove(txnId); err != nil {
 			return fmt.Errorf("removing txns: %v", err)
 		}
 		if t.isAfter() {
-			logger.Debugf("%d completed txns pruned so far", remover.removed)
+			logger.Debugf("%d completed txns pruned so far", remover.Removed())
 		}
 	}
-	if err := remover.flush(); err != nil {
+	if err := remover.Flush(); err != nil {
 		return fmt.Errorf("removing txns: %v", err)
 	}
 	if loopErr != EOF {
 		return loopErr
 	}
+	if stats != nil {
+		stats.TransactionsRemoved += remover.Removed()
+	}
 
-	logger.Debugf("pruning completed: removed %d txns", remover.removed)
+	logger.Debugf("pruning completed: removed %d txns", remover.Removed())
 	return nil
 }
 
@@ -382,8 +418,8 @@ func txnCollections(inNames []string, txnsName string) []string {
 	return outNames
 }
 
-// CleanupAllCollections iterates all collections that might have transaction queues and checks them to see if
-func CleanupAllCollections(db *mgo.Database, oracle Oracle, txnsName string) error {
+// cleanupAllCollections iterates all collections that might have transaction queues and checks them to see if
+func cleanupAllCollections(db *mgo.Database, oracle Oracle, txnsName string, stats *CleanupStats) error {
 	collNames, err := db.CollectionNames()
 	if err != nil {
 		return fmt.Errorf("reading collection names: %v", err)
@@ -398,6 +434,11 @@ func CleanupAllCollections(db *mgo.Database, oracle Oracle, txnsName string) err
 		if err := cleaner.Cleanup(); err != nil {
 			return err
 		}
+		if stats != nil {
+			stats.CollectionsInspected += 1
+			stats.DocsInspected += cleaner.stats.DocCount
+			stats.DocsCleaned += cleaner.stats.UpdatedDocCount
+		}
 	}
 	return nil
 }
@@ -406,6 +447,55 @@ func txnTokenToId(token string) bson.ObjectId {
 	// mgo/txn transaction tokens are the 24 character txn id
 	// followed by "_<nonce>"
 	return bson.ObjectIdHex(token[:24])
+}
+
+func newBatchRemover(coll *mgo.Collection) *batchRemover {
+	return &batchRemover{
+		coll: coll,
+	}
+}
+
+type Remover interface {
+	Remove(id interface{}) error
+	Flush() error
+	Removed() int
+}
+
+type batchRemover struct {
+	coll      *mgo.Collection
+	queue	 []interface{}
+	removed int
+}
+
+var _ Remover = (*batchRemover)(nil)
+
+func (r *batchRemover) Remove(id interface{}) error {
+	r.queue = append(r.queue, id)
+	if len(r.queue) >= maxBulkOps {
+		return r.Flush()
+	}
+	return nil
+}
+
+func (r *batchRemover) Flush() error {
+	if len(r.queue) < 1 {
+		return nil // Nothing to do
+	}
+	filter := bson.M{"_id": bson.M{"$in": r.queue}}
+	switch result, err := r.coll.RemoveAll(filter); err {
+	case nil, mgo.ErrNotFound:
+		// It's OK for txns to no longer exist. Another process
+		// may have concurrently pruned them.
+		r.removed += result.Removed
+		r.queue = r.queue[:0]
+		return nil
+	default:
+		return err
+	}
+}
+
+func (r *batchRemover) Removed() int {
+	return r.removed
 }
 
 func newBulkRemover(coll *mgo.Collection) *bulkRemover {
@@ -421,22 +511,24 @@ type bulkRemover struct {
 	removed   int
 }
 
+var _ Remover = (*bulkRemover)(nil)
+
 func (r *bulkRemover) newChunk() {
 	r.chunk = r.coll.Bulk()
 	r.chunk.Unordered()
 	r.chunkSize = 0
 }
 
-func (r *bulkRemover) remove(id interface{}) error {
+func (r *bulkRemover) Remove(id interface{}) error {
 	r.chunk.Remove(bson.D{{"_id", id}})
 	r.chunkSize++
 	if r.chunkSize >= maxBulkOps {
-		return r.flush()
+		return r.Flush()
 	}
 	return nil
 }
 
-func (r *bulkRemover) flush() error {
+func (r *bulkRemover) Flush() error {
 	if r.chunkSize < 1 {
 		return nil // Nothing to do
 	}
@@ -450,6 +542,10 @@ func (r *bulkRemover) flush() error {
 	default:
 		return err
 	}
+}
+
+func (r *bulkRemover) Removed() int {
+	return r.removed
 }
 
 func newSimpleTimer(interval time.Duration) *simpleTimer {

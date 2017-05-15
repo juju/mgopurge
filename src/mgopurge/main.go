@@ -62,7 +62,12 @@ var allStages = []stage{
 		"prune",
 		"Prune finalised transactions",
 		func(db *mgo.Database, txns *mgo.Collection) error {
-			return jujutxn.CleanAndPrune(db, txns, -1)
+			stats, err := jujutxn.CleanAndPrune(db, txns, -1)
+			logger.Infof("clean and prune cleaned %d docs in %d collections\n"+
+				"  removed %d transactions and %d stash documents",
+				stats.DocsCleaned, stats.CollectionsInspected,
+				stats.TransactionsRemoved, stats.StashDocumentsRemoved)
+			return err
 		},
 	}, {
 		"compact",

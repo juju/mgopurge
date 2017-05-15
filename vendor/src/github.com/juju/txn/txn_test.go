@@ -226,6 +226,29 @@ func (s *txnSuite) TestNothingToDo(c *gc.C) {
 	c.Assert(maxAttempt, gc.Equals, 0)
 }
 
+func (s *txnSuite) TestErrorReturned(c *gc.C) {
+	maxAttempt := 0
+	realErr := errors.New("this is my error")
+	buildTxn := func(attempt int) ([]txn.Op, error) {
+		maxAttempt = attempt
+		return nil, realErr
+	}
+	err := s.txnRunner.Run(buildTxn)
+	c.Assert(err, gc.Equals, realErr)
+	c.Assert(maxAttempt, gc.Equals, 0)
+}
+
+func (s *txnSuite) TestNoOperationsNoErrors(c *gc.C) {
+	maxAttempt := 0
+	buildTxn := func(attempt int) ([]txn.Op, error) {
+		maxAttempt = attempt
+		return []txn.Op{}, nil
+	}
+	err := s.txnRunner.Run(buildTxn)
+	c.Assert(err, gc.IsNil)
+	c.Assert(maxAttempt, gc.Equals, 0)
+}
+
 func (s *txnSuite) TestTransientFailure(c *gc.C) {
 	s.insertDoc(c, "1", "Foo")
 	maxAttempt := 0
@@ -259,7 +282,8 @@ func (s *txnSuite) TestRunFailureIntermittentUnexpectedMessage(c *gc.C) {
 	// Doesn't matter what this returns as long as it isn't an error.
 	buildTxn := func(attempt int) ([]txn.Op, error) {
 		tries++
-		return nil, nil
+		// return 1 op that happens to do nothing
+		return []txn.Op{{}}, nil
 	}
 	err := runner.Run(buildTxn)
 	c.Check(err, gc.Equals, nil)
@@ -279,7 +303,8 @@ func (s *txnSuite) TestRunFailureAlwaysUnexpectedMessage(c *gc.C) {
 	// Doesn't matter what this returns as long as it isn't an error.
 	buildTxn := func(attempt int) ([]txn.Op, error) {
 		tries++
-		return nil, nil
+		// return 1 op that happens to do nothing
+		return []txn.Op{{}}, nil
 	}
 	err := runner.Run(buildTxn)
 	c.Check(err, gc.ErrorMatches, "unexpected message")
