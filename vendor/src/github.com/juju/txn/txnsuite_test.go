@@ -4,6 +4,9 @@
 package txn_test
 
 import (
+	"sync/atomic"
+	"time"
+
 	"github.com/juju/testing"
 	jc "github.com/juju/testing/checkers"
 	gc "gopkg.in/check.v1"
@@ -56,6 +59,32 @@ func (s *TxnSuite) runTxn(c *gc.C, ops ...txn.Op) bson.ObjectId {
 	return txnId
 }
 
+var objectIdCounter uint32
+
+// timestampBasedTxnId allows us to create an ObjectId that embeds an exact
+// timestamp. This isn't guaranteed unique always like bson.NewObjectId, but is
+// good enough for testing.
+func timestampBasedTxnId(timestamp time.Time) bson.ObjectId {
+	baseTxnId := bson.NewObjectIdWithTime(timestamp)
+	// We increment a counter so all ObjectIds will be distinct.
+	i := atomic.AddUint32(&objectIdCounter, 1)
+	asBytes := []byte(baseTxnId)
+	asBytes[9] = byte(i >> 16)
+	asBytes[10] = byte(i >> 8)
+	asBytes[11] = byte(i)
+	return bson.ObjectId(asBytes)
+}
+
+// runTxnWithTimestamp is the same as runTxn but forces the ObjectId of this
+// transaction to be at a particular timestamp.
+func (s *TxnSuite) runTxnWithTimestamp(c *gc.C, expectedErr error, timestamp time.Time, ops ...txn.Op) bson.ObjectId {
+	txnId := timestampBasedTxnId(timestamp)
+	c.Logf("generated txn %v from timestamp %v", txnId, timestamp)
+	err := s.runner.Run(ops, txnId, nil)
+	c.Assert(err, gc.Equals, expectedErr)
+	return txnId
+}
+
 func (s *TxnSuite) runFailingTxn(c *gc.C, expectedErr error, ops ...txn.Op) bson.ObjectId {
 	txnId := bson.NewObjectId()
 	err := s.runner.Run(ops, txnId, nil)
@@ -84,6 +113,18 @@ func (s *TxnSuite) assertTxns(c *gc.C, expectedIds ...bson.ObjectId) {
 		actualIds = append(actualIds, txnDoc.Id)
 	}
 	c.Assert(actualIds, jc.SameContents, expectedIds)
+}
+
+func checkTxnIds(c *gc.C, expectedIds []bson.ObjectId, actualIds []bson.ObjectId) {
+	expectedHex := make([]string, len(expectedIds))
+	for i, id := range expectedIds {
+		expectedHex[i] = id.Hex()
+	}
+	actualHex := make([]string, len(actualIds))
+	for i, id := range actualIds {
+		actualHex[i] = id.Hex()
+	}
+	c.Check(actualHex, jc.SameContents, expectedHex)
 }
 
 func (s *TxnSuite) assertDocQueue(c *gc.C, collection string, id interface{}, expectedIds ...bson.ObjectId) {

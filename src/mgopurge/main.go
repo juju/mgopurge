@@ -13,6 +13,7 @@ import (
 	"net"
 	"os"
 	"strings"
+	"time"
 
 	jujutxn "github.com/juju/txn"
 	"gopkg.in/mgo.v2"
@@ -62,7 +63,11 @@ var allStages = []stage{
 		"prune",
 		"Prune finalised transactions",
 		func(db *mgo.Database, txns *mgo.Collection) error {
-			stats, err := jujutxn.CleanAndPrune(db, txns, -1)
+			stats, err := jujutxn.CleanAndPrune(jujutxn.CleanAndPruneArgs{
+				Txns: txns,
+				TxnsCount: -1,
+				MaxTime: time.Now().Add(-time.Hour),
+			})
 			logger.Infof("clean and prune cleaned %d docs in %d collections\n"+
 				"  removed %d transactions and %d stash documents",
 				stats.DocsCleaned, stats.CollectionsInspected,

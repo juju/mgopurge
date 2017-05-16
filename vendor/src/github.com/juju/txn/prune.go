@@ -4,6 +4,7 @@
 package txn
 
 import (
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -100,14 +101,6 @@ func shouldPrune(oldCount, newCount int, pruneOptions PruneOptions) (bool, strin
 	return false, "transactions have not grown significantly"
 }
 
-func getOracle(db *mgo.Database, txns *mgo.Collection, txnsCount int, maxMemoryTxns int) (Oracle, func(), error) {
-	// If we don't have very many transactions, just use the in-memory version
-	if txnsCount < maxMemoryTxns {
-		return NewMemOracle(txns)
-	}
-	return NewDBOracle(db, txns)
-}
-
 func maybePrune(db *mgo.Database, txnsName string, pruneOpts PruneOptions) error {
 	validatePruneOptions(&pruneOpts)
 	txnsPrune := db.C(txnsPruneC(txnsName))
@@ -140,7 +133,11 @@ func maybePrune(db *mgo.Database, txnsName string, pruneOpts PruneOptions) error
 		return fmt.Errorf("failed to retrieve starting %q count: %v", txnsStashName, err)
 	}
 
-	stats, err := CleanAndPrune(db, txns, txnsCount)
+	stats, err := CleanAndPrune(CleanAndPruneArgs{
+		Txns:      txns,
+		TxnsCount: txnsCount,
+		MaxTime:   pruneOpts.MaxTime,
+	})
 	completed := time.Now()
 
 	txnsCountAfter, err := txns.Count()
@@ -157,6 +154,33 @@ func maybePrune(db *mgo.Database, txnsName string, pruneOpts PruneOptions) error
 	return writePruneTxnsCount(txnsPrune, started, completed, txnsCount, txnsCountAfter,
 		stashDocsBefore, stashDocsAfter)
 
+	return nil
+}
+
+// CleanAndPruneArgs specifies the parameters required by CleanAndPrune.
+type CleanAndPruneArgs struct {
+
+	// Txns is the collection that holds all of the transactions that we
+	// might want to prune. We will also make use of Txns.Database to find
+	// all of the collections that might make use of transactions from that
+	// collection.
+	Txns *mgo.Collection
+
+	// TxnsCount is a hint from Txns.Count() to avoid having to call it again
+	// to determine whether it is ok to hold the set of transactions in memory.
+	// It is optional, as we will call Txns.Count() if it is not supplied.
+	TxnsCount int
+
+	// MaxTime is a timestamp that provides a threshold of transactions
+	// that we will actually prune. Only transactions that were created
+	// before this threshold will be pruned.
+	MaxTime time.Time
+}
+
+func (args *CleanAndPruneArgs) validate() error {
+	if args.Txns == nil {
+		return errors.New("nil Txns not valid")
+	}
 	return nil
 }
 
@@ -182,35 +206,51 @@ type CleanupStats struct {
 
 // CleanAndPrune runs the cleanup steps, and then follows up with pruning all
 // of the transactions that are no longer referenced.
-func CleanAndPrune(db *mgo.Database, txns *mgo.Collection, txnsCountHint int) (CleanupStats, error) {
+func CleanAndPrune(args CleanAndPruneArgs) (CleanupStats, error) {
 	var stats CleanupStats
-	if txnsCountHint <= 0 {
-		txnsCount, err := txns.Count()
+
+	if err := args.validate(); err != nil {
+		return stats, err
+	}
+
+	db := args.Txns.Database
+
+	if args.TxnsCount <= 0 {
+		txnsCount, err := args.Txns.Count()
 		if err != nil {
 			return stats, err
 		}
-		txnsCountHint = txnsCount
+		args.TxnsCount = txnsCount
 	}
-	oracle, cleanup, err := getOracle(db, txns, txnsCountHint, maxMemoryTokens)
+
+	oracle, cleanup, err := getOracle(args, maxMemoryTokens)
 	defer cleanup()
 	if err != nil {
 		return stats, err
 	}
-	txnsStashName := txns.Name + ".stash"
+	txnsStashName := args.Txns.Name + ".stash"
 	txnsStash := db.C(txnsStashName)
 
-	if err := cleanupStash(db, oracle, txnsStash, &stats); err != nil {
+	if err := cleanupStash(oracle, txnsStash, &stats); err != nil { // XXX
 		return stats, err
 	}
 
-	if err := cleanupAllCollections(db, oracle, txns.Name, &stats); err != nil {
+	if err := cleanupAllCollections(db, oracle, args.Txns.Name, &stats); err != nil {
 		return stats, err
 	}
 
-	if err := PruneTxns(db, oracle, txns, &stats); err != nil {
+	if err := PruneTxns(oracle, args.Txns, &stats); err != nil {
 		return stats, err
 	}
 	return stats, nil
+}
+
+func getOracle(args CleanAndPruneArgs, maxMemoryTxns int) (Oracle, func(), error) {
+	// If we don't have very many transactions, just use the in-memory version
+	if args.TxnsCount < maxMemoryTxns {
+		return NewMemOracle(args.Txns, args.MaxTime)
+	}
+	return NewDBOracle(args.Txns, args.MaxTime)
 }
 
 // getPruneLastTxnsCount will return how many documents were in 'txns' the
@@ -286,10 +326,11 @@ func txnsPruneC(txnsName string) string {
 // TODO(mjs) - this knows way too much about mgo/txn's internals and
 // with a bit of luck something like this will one day be part of
 // mgo/txn.
-func PruneTxns(db *mgo.Database, oracle Oracle, txns *mgo.Collection, stats *CleanupStats) error {
+func PruneTxns(oracle Oracle, txns *mgo.Collection, stats *CleanupStats) error {
 	count := oracle.Count()
 	logger.Debugf("%d completed txns found", count)
 
+	db := txns.Database
 	collNames, err := db.CollectionNames()
 	if err != nil {
 		return fmt.Errorf("reading collection names: %v", err)
@@ -306,6 +347,7 @@ func PruneTxns(db *mgo.Database, oracle Oracle, txns *mgo.Collection, stats *Cle
 	// removal of transactions created during the pruning process.
 	t := newSimpleTimer(logInterval)
 	toRemove := make([]bson.ObjectId, 0, maxBulkOps)
+	referencedCount := 0
 	removedCount := 0
 	for _, collName := range collNames {
 		logger.Tracef("checking %s for txn references", collName)
@@ -325,12 +367,14 @@ func PruneTxns(db *mgo.Database, oracle Oracle, txns *mgo.Collection, stats *Cle
 				txnId := txnTokenToId(token)
 				toRemove = append(toRemove, txnId)
 				if t.isAfter() {
-					logger.Debugf("%d referenced txns found so far", removedCount)
+					logger.Debugf("%d referenced txns found so far", referencedCount)
 				}
 				if len(toRemove) >= maxBulkOps {
-					removedCount += len(toRemove)
-					if err := oracle.RemoveTxns(toRemove); err != nil {
+					referencedCount += len(toRemove)
+					if count, err := oracle.RemoveTxns(toRemove); err != nil {
 						return fmt.Errorf("removing completed txns: %v", err)
+					} else {
+						removedCount += count
 					}
 					toRemove = toRemove[:0]
 				}
@@ -341,13 +385,18 @@ func PruneTxns(db *mgo.Database, oracle Oracle, txns *mgo.Collection, stats *Cle
 		}
 	}
 	if len(toRemove) > 0 {
-		removedCount += len(toRemove)
-		if err := oracle.RemoveTxns(toRemove); err != nil {
+		referencedCount += len(toRemove)
+		if count, err := oracle.RemoveTxns(toRemove); err != nil {
 			return fmt.Errorf("removing completed txns: %v", err)
+		} else {
+			removedCount += count
 		}
 		toRemove = toRemove[:0]
 	}
-	logger.Debugf("%d txns are still referenced and will be kept", removedCount)
+	// We don't expect 'removedCount' to be nonzero because all of them
+	// should have been handled by the Clean pass.
+	logger.Debugf("%d txns are still referenced and will be kept (%d unexpected references)",
+		referencedCount, removedCount)
 
 	// Remove the no-longer-referenced transactions from the txns collection.
 	t = newSimpleTimer(logInterval)
@@ -462,8 +511,8 @@ type Remover interface {
 }
 
 type batchRemover struct {
-	coll      *mgo.Collection
-	queue	 []interface{}
+	coll    *mgo.Collection
+	queue   []interface{}
 	removed int
 }
 

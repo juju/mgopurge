@@ -6,6 +6,7 @@ package txn
 import (
 	"fmt"
 	"sort"
+	"time"
 
 	"gopkg.in/mgo.v2"
 	"gopkg.in/mgo.v2/bson"
@@ -39,7 +40,7 @@ type Oracle interface {
 
 	// RemoveTxns can be used to flag that a given transaction should not
 	// be considered part of the valid set.
-	RemoveTxns(txnIds []bson.ObjectId) error
+	RemoveTxns(txnIds []bson.ObjectId) (int, error)
 
 	// IterTxns lets you iterate over all of the transactions that have
 	// not been removed.
@@ -65,15 +66,30 @@ func checkMongoSupportsOut(db *mgo.Database) bool {
 	return v[0] > 2 || (v[0] == 2 && v[1] >= 6)
 }
 
+// completedOldTransactionMatch creates a search parameter for transactions
+// that are flagged as completed, and were generated older than the given
+// timestamp. If the timestamp is empty,then only the completed status is evaluated.
+// The returned object is suitable for being passed to a $match or a Find() operation.
+func completedOldTransactionMatch(timestamp time.Time) bson.M {
+	match := bson.M{"s": bson.M{"$gte": taborted}}
+	if !timestamp.IsZero() {
+		match["_id"] = bson.M{"$lt": bson.NewObjectIdWithTime(timestamp)}
+	}
+	return match
+}
+
 // NewDBOracle uses a database collection to manage the queue of remaining
 // transactions.
 // The caller is responsible to call the returned cleanup() function, to ensure
 // that any resources are freed.
-func NewDBOracle(db *mgo.Database, txns *mgo.Collection) (*DBOracle, func(), error) {
+// thresholdTime is used to omit transactions that are newer than this time
+// (eg, don't consider transactions that are less than 1 hr old to be considered completed yet.)
+func NewDBOracle(txns *mgo.Collection, thresholdTime time.Time) (*DBOracle, func(), error) {
 	oracle := &DBOracle{
-		db:            db,
+		db:            txns.Database,
 		txns:          txns,
-		usingMongoOut: checkMongoSupportsOut(db),
+		thresholdTime: thresholdTime,
+		usingMongoOut: checkMongoSupportsOut(txns.Database),
 	}
 	cleanup, err := oracle.prepare()
 	return oracle, cleanup, err
@@ -89,6 +105,7 @@ type DBOracle struct {
 	db              *mgo.Database
 	txns            *mgo.Collection
 	working         *mgo.Collection
+	thresholdTime   time.Time
 	usingMongoOut   bool
 	checkedTokens   uint64
 	completedTokens uint64
@@ -103,7 +120,8 @@ func (o *DBOracle) prepareWorkingDirectly() error {
 	logger.Debugf("iterating the transactions collection to build the working set: %q", o.working.Name)
 	// Make sure the working set is clean
 	o.working.DropCollection()
-	query := o.txns.Find(bson.M{"s": bson.M{"$gte": taborted}}).Select(bson.M{"_id": 1})
+	query := o.txns.Find(completedOldTransactionMatch(o.thresholdTime))
+	query.Select(bson.M{"_id": 1})
 	query.Batch(maxBatchDocs)
 	iter := query.Iter()
 	var txnDoc struct {
@@ -149,9 +167,10 @@ func (o *DBOracle) prepareWorkingDirectly() error {
 // prepareWorkingWithPipeline adds a $out stage to the pipeline, and has mongo
 // populate the working set. This is the preferred method if Mongo supports $out.
 func (o *DBOracle) prepareWorkingWithPipeline() error {
+	logger.Debugf("searching for transactions older than %s", o.thresholdTime)
 	pipeline := []bson.M{
 		// This used to use $in but that's much slower than $gte.
-		{"$match": bson.M{"s": bson.M{"$gte": taborted}}},
+		{"$match": completedOldTransactionMatch(o.thresholdTime)},
 		{"$project": bson.M{"_id": 1}},
 		{"$out": o.working.Name},
 	}
@@ -249,12 +268,15 @@ func (o *DBOracle) CompletedTokens(tokens []string) (map[string]bool, error) {
 
 // RemoveTxns can be used to flag that a given transaction should not
 // be considered part of the valid set.
-func (o *DBOracle) RemoveTxns(txnIds []bson.ObjectId) error {
-	_, err := o.working.RemoveAll(bson.M{"_id": bson.M{"$in": txnIds}})
+func (o *DBOracle) RemoveTxns(txnIds []bson.ObjectId) (int, error) {
+	info, err := o.working.RemoveAll(bson.M{"_id": bson.M{"$in": txnIds}})
 	if err != nil {
-		return fmt.Errorf("error removing transaction ids: %v", err)
+		return 0, fmt.Errorf("error removing transaction ids: %v", err)
 	}
-	return nil
+	if info != nil {
+		return info.Removed, nil
+	}
+	return 0, nil
 }
 
 type dbIterWrapper struct {
@@ -292,6 +314,7 @@ func (o *DBOracle) IterTxns() (OracleIterator, error) {
 // completed and purgeable.
 type MemOracle struct {
 	txns            *mgo.Collection
+	thresholdTime   time.Time
 	completed       map[bson.ObjectId]struct{}
 	checkedTokens   uint64
 	completedTokens uint64
@@ -300,9 +323,10 @@ type MemOracle struct {
 
 // NewMemOracle uses an in-memory map to manage the queue of  remaining
 // transactions.
-func NewMemOracle(txns *mgo.Collection) (*MemOracle, func(), error) {
+func NewMemOracle(txns *mgo.Collection, thresholdTime time.Time) (*MemOracle, func(), error) {
 	oracle := &MemOracle{
-		txns: txns,
+		txns:          txns,
+		thresholdTime: thresholdTime,
 	}
 	err := oracle.prepare()
 	return oracle, noopCleanup, err
@@ -321,7 +345,7 @@ func (o *MemOracle) prepare() error {
 	logger.Debugf("loading all completed transactions")
 	pipe := o.txns.Pipe([]bson.M{
 		// This used to use $in but that's much slower than $gte.
-		{"$match": bson.M{"s": bson.M{"$gte": taborted}}},
+		{"$match": completedOldTransactionMatch(o.thresholdTime)},
 		{"$project": bson.M{"_id": 1}},
 	})
 	pipe.Batch(maxBatchDocs)
@@ -373,11 +397,15 @@ func (o *MemOracle) CompletedTokens(tokens []string) (map[string]bool, error) {
 
 // RemoveTxns can be used to flag that a given transaction should not
 // be considered part of the valid set.
-func (o *MemOracle) RemoveTxns(txnIds []bson.ObjectId) error {
+func (o *MemOracle) RemoveTxns(txnIds []bson.ObjectId) (int, error) {
+	removedCount := 0
 	for _, txnId := range txnIds {
+		if _, ok := o.completed[txnId]; ok {
+			removedCount++
+		}
 		delete(o.completed, txnId)
 	}
-	return nil
+	return removedCount, nil
 }
 
 type memIterator struct {

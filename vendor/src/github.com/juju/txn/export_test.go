@@ -4,6 +4,8 @@
 package txn
 
 import (
+	"time"
+
 	"gopkg.in/mgo.v2"
 )
 
@@ -22,11 +24,12 @@ var CheckMongoSupportsOut = checkMongoSupportsOut
 // NewDBOracleNoOut is only used for testing. It forces the DBOracle to not ask
 // mongo to populate the working set in the aggregation pipeline, which is our
 // compatibility code for older mongo versions.
-func NewDBOracleNoOut(db *mgo.Database, txns *mgo.Collection) (*DBOracle, func(), error) {
+func NewDBOracleNoOut(txns *mgo.Collection, thresholdTime time.Time) (*DBOracle, func(), error) {
 	oracle := &DBOracle{
-		db:            db,
+		db:            txns.Database,
 		txns:          txns,
 		usingMongoOut: false,
+		thresholdTime: thresholdTime,
 	}
 	cleanup, err := oracle.prepare()
 	return oracle, cleanup, err
