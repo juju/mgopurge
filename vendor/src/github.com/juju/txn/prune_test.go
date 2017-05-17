@@ -22,6 +22,11 @@ type PruneSuite struct {
 var _ = gc.Suite(&PruneSuite{})
 
 func (s *PruneSuite) maybePrune(c *gc.C, pruneFactor float32) {
+	// A 'zero' timestamp means to ignore the time threshold
+	s.maybePruneWithTimestamp(c, pruneFactor, time.Time{})
+}
+
+func (s *PruneSuite) maybePruneWithTimestamp(c *gc.C, pruneFactor float32, timestamp time.Time) {
 	r := jujutxn.NewRunner(jujutxn.RunnerParams{
 		Database:                  s.db,
 		TransactionCollectionName: s.txns.Name,
@@ -31,6 +36,7 @@ func (s *PruneSuite) maybePrune(c *gc.C, pruneFactor float32) {
 		PruneFactor:        pruneFactor,
 		MinNewTransactions: 1,
 		MaxNewTransactions: 1000,
+		MaxTime:            timestamp,
 	})
 	c.Assert(err, jc.ErrorIsNil)
 }
@@ -359,6 +365,28 @@ func (s *PruneSuite) TestManyTxnRemovals(c *gc.C) {
 	s.maybePrune(c, 1)
 	s.assertTxns(c)
 	s.assertDocQueue(c, "coll", 0)
+}
+
+func (s *PruneSuite) TestIgnoresNewTxns(c *gc.C) {
+	baseTime, err := time.Parse("2006-01-02 15:04:05", "2017-01-01 12:00:00")
+	c.Assert(err, jc.ErrorIsNil)
+	s.runTxnWithTimestamp(c, nil, baseTime.Add(-30*time.Second), txn.Op{
+		C:      "coll",
+		Id:     0,
+		Insert: bson.M{},
+	})
+	txnId2 := s.runTxnWithTimestamp(c, nil, baseTime, txn.Op{
+		C:      "coll",
+		Id:     0,
+		Update: bson.M{},
+	})
+	txnId3 := s.runTxnWithTimestamp(c, nil, baseTime.Add(30*time.Second), txn.Op{
+		C:      "col",
+		Id:     0,
+		Remove: true,
+	})
+	s.maybePruneWithTimestamp(c, 1, baseTime)
+	s.assertTxns(c, txnId2, txnId3)
 }
 
 func (s *PruneSuite) TestFirstRun(c *gc.C) {

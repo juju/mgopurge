@@ -4,6 +4,8 @@
 package txn_test
 
 import (
+	"time"
+
 	jc "github.com/juju/testing/checkers"
 	gc "gopkg.in/check.v1"
 	"gopkg.in/mgo.v2"
@@ -16,7 +18,7 @@ import (
 // OracleSuite will be run against all oracle implementations.
 type OracleSuite struct {
 	TxnSuite
-	OracleFunc func(*mgo.Database, *mgo.Collection) (jujutxn.Oracle, func(), error)
+	OracleFunc func(*mgo.Collection, time.Time) (jujutxn.Oracle, func(), error)
 }
 
 func (s *OracleSuite) txnToToken(c *gc.C, id bson.ObjectId) string {
@@ -40,7 +42,7 @@ func (s *OracleSuite) TestKnownAndUnknownTxns(c *gc.C) {
 		Id:     0,
 		Update: bson.M{},
 	})
-	oracle, cleanup, err := s.OracleFunc(s.db, s.txns)
+	oracle, cleanup, err := s.OracleFunc(s.txns, time.Time{})
 	defer cleanup()
 	c.Assert(oracle, gc.NotNil)
 	c.Assert(err, jc.ErrorIsNil)
@@ -69,7 +71,7 @@ func (s *OracleSuite) TestRemovedTxns(c *gc.C) {
 		Id:     1,
 		Insert: bson.M{},
 	})
-	oracle, cleanup, err := s.OracleFunc(s.db, s.txns)
+	oracle, cleanup, err := s.OracleFunc(s.txns, time.Time{})
 	defer cleanup()
 	c.Assert(oracle, gc.NotNil)
 	c.Assert(err, jc.ErrorIsNil)
@@ -81,8 +83,9 @@ func (s *OracleSuite) TestRemovedTxns(c *gc.C) {
 		token1: true,
 		token2: true,
 	})
-	err = oracle.RemoveTxns([]bson.ObjectId{txnId1})
+	count, err := oracle.RemoveTxns([]bson.ObjectId{txnId1})
 	c.Assert(err, jc.ErrorIsNil)
+	c.Check(count, gc.Equals, 1)
 	completed, err = oracle.CompletedTokens([]string{token1, token2})
 	c.Assert(err, jc.ErrorIsNil)
 	c.Check(completed, jc.DeepEquals, map[string]bool{
@@ -106,12 +109,19 @@ func (s *OracleSuite) TestIterTxns(c *gc.C) {
 		Id:     2,
 		Insert: bson.M{},
 	})
-	oracle, cleanup, err := s.OracleFunc(s.db, s.txns)
+	oracle, cleanup, err := s.OracleFunc(s.txns, time.Time{})
 	defer cleanup()
 	c.Assert(oracle, gc.NotNil)
 	c.Assert(err, jc.ErrorIsNil)
 	c.Check(oracle.Count(), gc.Equals, 3)
-	oracle.RemoveTxns([]bson.ObjectId{txnId2})
+	count, err := oracle.RemoveTxns([]bson.ObjectId{txnId2})
+	c.Assert(err, jc.ErrorIsNil)
+	c.Check(count, gc.Equals, 1)
+	c.Check(oracle.Count(), gc.Equals, 2)
+	// Doesn't hurt to remove one already removed
+	count, err = oracle.RemoveTxns([]bson.ObjectId{txnId2})
+	c.Assert(err, jc.ErrorIsNil)
+	c.Check(count, gc.Equals, 0)
 	c.Check(oracle.Count(), gc.Equals, 2)
 	all := make([]bson.ObjectId, 0)
 	iter, err := oracle.IterTxns()
@@ -125,8 +135,75 @@ func (s *OracleSuite) TestIterTxns(c *gc.C) {
 	c.Check(all, jc.DeepEquals, []bson.ObjectId{txnId1, txnId3})
 }
 
-func dbOracleFunc(db *mgo.Database, c *mgo.Collection) (jujutxn.Oracle, func(), error) {
-	return jujutxn.NewDBOracle(db, c)
+func (s *OracleSuite) TestDoesntSeeNewTransactions(c *gc.C) {
+	baseTime, err := time.Parse("2006-01-02 15:04:05", "2017-01-01 12:00:00")
+	c.Assert(err, jc.ErrorIsNil)
+	txnId1 := s.runTxnWithTimestamp(c, nil, baseTime.Add(-time.Second), txn.Op{
+		C:      "coll",
+		Id:     1,
+		Insert: bson.M{},
+	})
+	s.runTxnWithTimestamp(c, nil, baseTime, txn.Op{
+		C:      "coll",
+		Id:     2,
+		Insert: bson.M{},
+	})
+	s.runTxnWithTimestamp(c, nil, baseTime.Add(time.Second), txn.Op{
+		C:      "coll",
+		Id:     3,
+		Insert: bson.M{},
+	})
+	oracle, cleanup, err := s.OracleFunc(s.txns, baseTime)
+	defer cleanup()
+	c.Assert(oracle, gc.NotNil)
+	c.Assert(err, jc.ErrorIsNil)
+	all := make([]bson.ObjectId, 0)
+	iter, err := oracle.IterTxns()
+	c.Assert(err, jc.ErrorIsNil)
+	var txnId bson.ObjectId
+	for txnId, err = iter.Next(); err == nil; txnId, err = iter.Next() {
+		all = append(all, txnId)
+	}
+	c.Assert(err, gc.Equals, jujutxn.EOF)
+	// Objects that are exactly 'baseTime' or newer are omitted
+	checkTxnIds(c, []bson.ObjectId{txnId1}, all)
+}
+
+func (s *OracleSuite) TestNoThresholdSeesAllTransactions(c *gc.C) {
+	baseTime := time.Now()
+	txnId1 := s.runTxnWithTimestamp(c, nil, baseTime.Add(-30*time.Second), txn.Op{
+		C:      "coll",
+		Id:     1,
+		Insert: bson.M{},
+	})
+	txnId2 := s.runTxnWithTimestamp(c, nil, baseTime, txn.Op{
+		C:      "coll",
+		Id:     2,
+		Insert: bson.M{},
+	})
+	txnId3 := s.runTxnWithTimestamp(c, nil, baseTime.Add(30*time.Second), txn.Op{
+		C:      "coll",
+		Id:     3,
+		Insert: bson.M{},
+	})
+	oracle, cleanup, err := s.OracleFunc(s.txns, time.Time{})
+	defer cleanup()
+	c.Assert(oracle, gc.NotNil)
+	c.Assert(err, jc.ErrorIsNil)
+	all := make([]bson.ObjectId, 0)
+	iter, err := oracle.IterTxns()
+	c.Assert(err, jc.ErrorIsNil)
+	var txnId bson.ObjectId
+	for txnId, err = iter.Next(); err == nil; txnId, err = iter.Next() {
+		all = append(all, txnId)
+	}
+	c.Assert(err, gc.Equals, jujutxn.EOF)
+	// Objects that are exactly 'baseTime' or newer are omitted
+	checkTxnIds(c, []bson.ObjectId{txnId1, txnId2, txnId3}, all)
+}
+
+func dbOracleFunc(c *mgo.Collection, thresholdTime time.Time) (jujutxn.Oracle, func(), error) {
+	return jujutxn.NewDBOracle(c, thresholdTime)
 }
 
 // DBOracleSuite causes the test suite to run against the DBOracle implementation
@@ -157,8 +234,8 @@ type DBCompatOracleSuite struct {
 	OracleSuite
 }
 
-func dbNoOutOracleFunc(db *mgo.Database, c *mgo.Collection) (jujutxn.Oracle, func(), error) {
-	return jujutxn.NewDBOracleNoOut(db, c)
+func dbNoOutOracleFunc(c *mgo.Collection, thresholdTime time.Time) (jujutxn.Oracle, func(), error) {
+	return jujutxn.NewDBOracleNoOut(c, thresholdTime)
 }
 
 var _ = gc.Suite(&DBCompatOracleSuite{
@@ -167,8 +244,8 @@ var _ = gc.Suite(&DBCompatOracleSuite{
 	},
 })
 
-func memOracleFunc(db *mgo.Database, c *mgo.Collection) (jujutxn.Oracle, func(), error) {
-	return jujutxn.NewMemOracle(c)
+func memOracleFunc(c *mgo.Collection, thresholdTime time.Time) (jujutxn.Oracle, func(), error) {
+	return jujutxn.NewMemOracle(c, thresholdTime)
 }
 
 type MemOracleSuite struct {
