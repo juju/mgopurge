@@ -65,7 +65,6 @@ var allStages = []stage{
 		func(db *mgo.Database, txns *mgo.Collection) error {
 			stats, err := jujutxn.CleanAndPrune(jujutxn.CleanAndPruneArgs{
 				Txns: txns,
-				TxnsCount: -1,
 				MaxTime: time.Now().Add(-time.Hour),
 			})
 			logger.Infof("clean and prune cleaned %d docs in %d collections\n"+
