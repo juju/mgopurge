@@ -7,7 +7,6 @@ package main
 
 import (
 	"fmt"
-	"regexp"
 	"sort"
 
 	"gopkg.in/mgo.v2"
@@ -25,12 +24,6 @@ import (
 // NOTE! - This is a fork of the upstream PurgeMissing which correctly
 // handles invalid txn tokens.
 func PurgeMissing(tc, sc *mgo.Collection, collNames ...string) error {
-
-	type TDoc struct {
-		Id       interface{}   "_id"
-		TxnQueue []interface{} "txn-queue"
-	}
-
 	found := make(map[bson.ObjectId]bool)
 	txnTokenOk := func(txnToken interface{}) bool {
 		txnId, ok := tokenToId(txnToken)
@@ -51,18 +44,18 @@ func PurgeMissing(tc, sc *mgo.Collection, collNames ...string) error {
 	for _, collName := range collNames {
 		c := tc.Database.C(collName)
 		iter := c.Find(nil).Select(bson.M{"_id": 1, "txn-queue": 1}).Iter()
-		var tdoc TDoc
-		for iter.Next(&tdoc) {
+		var doc tdoc
+		for iter.Next(&doc) {
 			var badTokens []interface{}
-			for _, txnToken := range tdoc.TxnQueue {
+			for _, txnToken := range doc.TxnQueue {
 				if !txnTokenOk(txnToken) {
 					badTokens = append(badTokens, txnToken)
 				}
 			}
 			if len(badTokens) > 0 {
 				logger.Debugf("document %s/%v: purging %d orphaned or invalid txn tokens",
-					collName, tdoc.Id, len(badTokens))
-				if err := pullTokens(c, tdoc.Id, badTokens); err != nil {
+					collName, doc.Id, len(badTokens))
+				if err := pullTokens(c, doc.Id, badTokens); err != nil {
 					return err
 				}
 			}
@@ -72,13 +65,8 @@ func PurgeMissing(tc, sc *mgo.Collection, collNames ...string) error {
 		}
 	}
 
-	type StashTDoc struct {
-		Id       docKey        "_id"
-		TxnQueue []interface{} "txn-queue"
-	}
-
 	iter := sc.Find(nil).Select(bson.M{"_id": 1, "txn-queue": 1}).Iter()
-	var stdoc StashTDoc
+	var stdoc stashTDoc
 	for iter.Next(&stdoc) {
 		var badTokens []interface{}
 		for _, txnToken := range stdoc.TxnQueue {
@@ -100,24 +88,6 @@ func PurgeMissing(tc, sc *mgo.Collection, collNames ...string) error {
 	}
 
 	return nil
-}
-
-type docKey struct {
-	C  string
-	Id interface{}
-}
-
-var validToken = regexp.MustCompile(`[a-f0-9]{24}_[a-f0-9]{8}`)
-
-func tokenToId(token interface{}) (bson.ObjectId, bool) {
-	tokenStr, ok := token.(string)
-	if !ok {
-		return "", false
-	}
-	if !validToken.MatchString(tokenStr) {
-		return "", false
-	}
-	return bson.ObjectIdHex(tokenStr[:24]), true
 }
 
 func pullTokens(collection *mgo.Collection, docId interface{}, tokens []interface{}) error {
