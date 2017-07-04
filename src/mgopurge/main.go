@@ -77,7 +77,16 @@ var allStages = []stage{
 		"compact",
 		"Compact database to release disk space (does not compact replicas)",
 		func(db *mgo.Database, _ *mgo.Collection) error {
-			return compact(db)
+			err := compact(db)
+			if err != nil {
+				return err
+			}
+			logsDB := db.Session.DB("logs")
+			err = compact(logsDB)
+			if err != nil {
+				return err
+			}
+			return nil
 		},
 	},
 }
