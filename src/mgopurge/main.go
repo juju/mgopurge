@@ -54,6 +54,13 @@ var allStages = []stage{
 			return PurgeMissing(txns, db.C(txnsStashC), collections...)
 		},
 	}, {
+		"trim",
+		"Trim txn-queues that are longer than 10000",
+		func(db *mgo.Database, txns *mgo.Collection) error {
+			collections := getAllPurgeableCollections(db)
+			return TrimLongTransactionQueues(txns, collections...)
+		},
+	}, {
 		"resume",
 		"Resume incomplete transactions",
 		func(db *mgo.Database, txns *mgo.Collection) error {
