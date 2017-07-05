@@ -4,7 +4,7 @@
 		{
 			"importpath": "github.com/juju/loggo",
 			"repository": "https://github.com/juju/loggo",
-			"revision": "0e0537f18a29c2f0a814dad75b1ccc577852538a",
+			"revision": "8232ab8918d91c72af1a9fb94d3edbe31d88b790",
 			"branch": "master"
 		},
 		{
