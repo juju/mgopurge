@@ -14,15 +14,13 @@ import (
 var logger = loggo.GetLogger("mgopurge")
 
 func setupLogging() error {
-	writer := loggo.NewSimpleWriter(os.Stderr, new(logFormatter))
+	writer := loggo.NewSimpleWriter(os.Stderr, logFormatter)
 	loggo.ReplaceDefaultWriter(writer)
 	return loggo.ConfigureLoggers("<root>=TRACE")
 }
 
-type logFormatter struct{}
-
-func (f *logFormatter) Format(_ loggo.Level, _, _ string, _ int, timestamp time.Time, message string) string {
-	ts := timestamp.In(time.UTC).Format("2006-01-02 15:04:05")
-	return fmt.Sprintf("%s %s", ts, message)
+func logFormatter(entry loggo.Entry) string {
+	ts := entry.Timestamp.In(time.UTC).Format("2006-01-02 15:04:05")
+	return fmt.Sprintf("%s %s %s", ts, entry.Level.Short(), entry.Message)
 
 }
