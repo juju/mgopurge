@@ -55,10 +55,10 @@ var allStages = []stage{
 		},
 	}, {
 		"trim",
-		"Trim txn-queues that are longer than 10000",
+		"Trim txn-queues that are longer than 1000",
 		func(db *mgo.Database, txns *mgo.Collection) error {
 			collections := getAllPurgeableCollections(db)
-			return TrimLongTransactionQueues(txns, collections...)
+			return TrimLongTransactionQueues(txns, 1000, collections...)
 		},
 	}, {
 		"resume",
