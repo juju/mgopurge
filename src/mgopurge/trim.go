@@ -64,7 +64,7 @@ func tokenToIdNonce(token interface{}) (bson.ObjectId, string, bool) {
 // we will Remove() at one passand how many tokens we could pull in one pass.)
 const defaultTxnBatchSize = 10000
 const maxTxnRemoveCount = 2000
-const maxPullTokenCount = 1000
+const maxPullTokenCount = 2000
 
 // LongTxnTrimmer handles processing transaction queues that have grown unmanageable
 // to be handled by the normal Resume logic.
@@ -207,6 +207,7 @@ type txnBatchTrimmer struct {
 
 	txnRemover   func([]bson.ObjectId) error
 	tokenRemover func(docKey, []interface{}) error
+	tokenSetter  func(docKey, []string, int) error
 }
 
 // checkTransactionsFindDocs ensures that all of the transactions listed are of
@@ -265,6 +266,7 @@ func (tb *txnBatchTrimmer) checkTransactionsFindDocs() {
 func (tb *txnBatchTrimmer) processDocs() error {
 	for key, doc := range tb.docsToCleanup {
 		tokensToPull := make([]interface{}, 0, len(tb.txnsToRemove))
+		tokensToSet := make([]string, 0, len(doc.queue))
 		remainingQueue := make([]parsedToken, 0, len(doc.queue))
 		for _, tokenInfo := range doc.queue {
 			if _, ok := tb.txns[tokenInfo.txnId]; ok {
@@ -274,11 +276,15 @@ func (tb *txnBatchTrimmer) processDocs() error {
 				tokensToPull = append(tokensToPull, tokenInfo.token)
 			} else {
 				remainingQueue = append(remainingQueue, tokenInfo)
+				tokensToSet = append(tokensToSet, tokenInfo.token)
 			}
 		}
-		if err := tb.tokenRemover(key, tokensToPull); err != nil {
+		if err := tb.tokenSetter(key, tokensToSet, len(tokensToPull)); err != nil {
 			return err
 		}
+		// if err := tb.tokenRemover(key, tokensToPull); err != nil {
+		// 	return err
+		// }
 		doc.queue = remainingQueue
 	}
 	return nil
@@ -293,6 +299,20 @@ func (tb *txnBatchTrimmer) Process() error {
 	if err := tb.processDocs(); err != nil {
 		return err
 	}
+	return nil
+}
+
+// setTxnQueue rewrites the entire txn-queue field to be exactly 'tokens'
+func (ltt *LongTxnTrimmer) setTxnQueue(key docKey, tokens []string, pulledCount int) error {
+	tStart := time.Now()
+	coll := ltt.txns.Database.C(key.C)
+	err := coll.UpdateId(key.Id, bson.M{"$set": bson.M{"txn-queue": tokens}})
+	if err != nil {
+		return err
+	}
+	ltt.tokensPulledCount += pulledCount
+	ltt.tokensPulledTime += time.Since(tStart)
+	ltt.checkProgress()
 	return nil
 }
 
@@ -348,6 +368,7 @@ func (ltt *LongTxnTrimmer) processQueue() error {
 			docCache:     ltt.docCache,
 			txnRemover:   ltt.removeTransactions,
 			tokenRemover: ltt.pullTokens,
+			tokenSetter:  ltt.setTxnQueue,
 		}
 		if err := trimmer.Process(); err != nil {
 			return err
