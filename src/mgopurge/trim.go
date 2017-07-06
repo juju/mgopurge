@@ -77,6 +77,8 @@ type LongTxnTrimmer struct {
 
 	txnBatchSize      int
 	txnsRemovedCount  int
+	txnsNotPrepared   int
+	txnsNotAllDocs    int
 	docCleanupCount   int
 	tokensPulledCount int
 }
@@ -111,13 +113,13 @@ func (ltt *LongTxnTrimmer) loadTxns(ids []bson.ObjectId) (map[bson.ObjectId]*raw
 
 func (ltt *LongTxnTrimmer) checkProgress() {
 	if ltt.timer != nil && ltt.timer.isAfter() {
-		logger.Debugf("removed %d txns from %s, pulled %d tokens",
-			ltt.txnsRemovedCount, ltt.txns.Name, ltt.tokensPulledCount)
+		logger.Debugf("removed %d txns from %s, pulled %d tokens (preserved %d+%d transactions)",
+			ltt.txnsRemovedCount, ltt.txns.Name, ltt.tokensPulledCount,
+			ltt.txnsNotPrepared, ltt.txnsNotAllDocs)
 	}
 }
 
 func (ltt *LongTxnTrimmer) removeTransactions(txnsToRemove []bson.ObjectId) error {
-	logger.Debugf("removing %d transactions", len(txnsToRemove))
 	for len(txnsToRemove) > 0 {
 		batch := txnsToRemove
 		if len(batch) > ltt.txnBatchSize {
@@ -187,6 +189,9 @@ type txnBatchTrimmer struct {
 	txns          map[bson.ObjectId]*rawTransaction
 	txnsToRemove  []bson.ObjectId
 
+	omitNotPreparedCount int
+	omitNotAllDocsCount  int
+
 	txnRemover   func([]bson.ObjectId) error
 	tokenRemover func(docKey, []interface{}) error
 }
@@ -207,6 +212,7 @@ func (tb *txnBatchTrimmer) checkTransactionsFindDocs() {
 		if txn.State != tpreparing && txn.State != tprepared {
 			// This transaction should not be pruned
 			// logger.Tracef("txn %v not in state prepared/preparing: %d", txnId, txn.State)
+			tb.omitNotPreparedCount++
 			delete(tb.txns, txnId)
 			continue
 		}
@@ -231,6 +237,7 @@ func (tb *txnBatchTrimmer) checkTransactionsFindDocs() {
 		if !foundAllDocs {
 			// We won't purge this transaction if one of the docs
 			// involved doesn't have a long transaction queues
+			tb.omitNotAllDocsCount++
 			delete(tb.txns, txnId)
 			continue
 		}
@@ -315,6 +322,8 @@ func (ltt *LongTxnTrimmer) processQueue() error {
 		if err := trimmer.Process(); err != nil {
 			return err
 		}
+		ltt.txnsNotPrepared += trimmer.omitNotPreparedCount
+		ltt.txnsNotAllDocs += trimmer.omitNotAllDocsCount
 	}
 	return nil
 }
