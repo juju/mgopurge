@@ -60,8 +60,11 @@ func tokenToIdNonce(token interface{}) (bson.ObjectId, string, bool) {
 	return bson.ObjectIdHex(tokenStr[:24]), tokenStr[25:], true
 }
 
-// defaultTxnBatchSize is how many transactions we will Remove() at a time
-const defaultTxnBatchSize = 5000
+// defaultTxnBatchSize is how many transactions we process per batch (affects how many
+// we will Remove() at one passand how many tokens we could pull in one pass.)
+const defaultTxnBatchSize = 10000
+const maxTxnRemoveCount = 2000
+const maxPullTokenCount = 1000
 
 // LongTxnTrimmer handles processing transaction queues that have grown unmanageable
 // to be handled by the normal Resume logic.
@@ -128,8 +131,8 @@ func (ltt *LongTxnTrimmer) checkProgress() {
 func (ltt *LongTxnTrimmer) removeTransactions(txnsToRemove []bson.ObjectId) error {
 	for len(txnsToRemove) > 0 {
 		batch := txnsToRemove
-		if len(batch) > ltt.txnBatchSize {
-			batch = batch[:ltt.txnBatchSize]
+		if len(batch) > maxTxnRemoveCount {
+			batch = batch[:maxTxnRemoveCount]
 		}
 		tStart := time.Now()
 		txnsToRemove = txnsToRemove[len(batch):]
@@ -294,15 +297,31 @@ func (tb *txnBatchTrimmer) Process() error {
 }
 
 func (ltt *LongTxnTrimmer) pullTokens(key docKey, tokens []interface{}) error {
-	tStart := time.Now()
 	// default mgopurge includes TRACE logging
 	// logger.Tracef("removing %d tokens from %q %v", len(tokens), key.C, key.Id)
-	if err := pullTokens(ltt.txns.Database.C(key.C), key.Id, tokens); err != nil {
-		return err
+	// Note(jam): 2017-07-16 On large collections this seems to be the bulk
+	// of the time spent. We may want to revisit whether it is better to use $pullAll
+	// or whether it would be better to just rewrite the txn-queue field directly.
+	// $pullAll is traditionally used because it is safe to be done concurrently
+	// but given we have up to 300k entries in txn-queue matching those 300k
+	// entries with the ~5000 tokens we pull at a time might be a bad idea.
+	// (mongo might be implementing the pull by iterating both lists, essentially
+	// making it N*M for every pull request.)
+	remaining := tokens
+	for len(remaining) > 0 {
+		batch := remaining
+		if len(batch) > maxPullTokenCount {
+			batch = batch[:maxPullTokenCount]
+		}
+		tStart := time.Now()
+		remaining = remaining[len(batch):]
+		if err := pullTokens(ltt.txns.Database.C(key.C), key.Id, batch); err != nil {
+			return err
+		}
+		ltt.tokensPulledCount += len(batch)
+		ltt.tokensPulledTime += time.Since(tStart)
+		ltt.checkProgress()
 	}
-	ltt.tokensPulledCount += len(tokens)
-	ltt.tokensPulledTime += time.Since(tStart)
-	ltt.checkProgress()
 	return nil
 }
 
