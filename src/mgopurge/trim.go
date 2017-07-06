@@ -62,7 +62,7 @@ func tokenToIdNonce(token interface{}) (bson.ObjectId, string, bool) {
 
 // defaultTxnBatchSize is how many transactions we process per batch (affects how many
 // we will Remove() at one passand how many tokens we could pull in one pass.)
-const defaultTxnBatchSize = 10000
+const defaultTxnBatchSize = 50000
 const maxTxnRemoveCount = 2000
 const maxPullTokenCount = 2000
 
@@ -283,7 +283,7 @@ func (tb *txnBatchTrimmer) processDocs() error {
 		// to set the tokens directly, but for many tokens in the queue, it
 		// is better to use $pullAll.
 		// I don't know the exact threshold here, but I'm attempting a tradeoff
-		if len(tokensToPull)*5 > len(tokensToSet) {
+		if len(tokensToPull)*3 > len(tokensToSet) {
 			// We are removing more than 20% of the tokens, so set the content
 			if err := tb.tokenSetter(key, tokensToSet, len(tokensToPull)); err != nil {
 				return err
@@ -338,8 +338,8 @@ func (ltt *LongTxnTrimmer) pullTokens(key docKey, tokens []interface{}) error {
 	remaining := tokens
 	for len(remaining) > 0 {
 		batch := remaining
-		if len(batch) > maxPullTokenCount {
-			batch = batch[:maxPullTokenCount]
+		if len(batch) > ltt.txnBatchSize {
+			batch = batch[:ltt.txnBatchSize]
 		}
 		tStart := time.Now()
 		remaining = remaining[len(batch):]
