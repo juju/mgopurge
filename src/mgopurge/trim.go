@@ -279,12 +279,20 @@ func (tb *txnBatchTrimmer) processDocs() error {
 				tokensToSet = append(tokensToSet, tokenInfo.token)
 			}
 		}
-		if err := tb.tokenSetter(key, tokensToSet, len(tokensToPull)); err != nil {
-			return err
+		// for small numbers of tokens left in the queue, it is much faster
+		// to set the tokens directly, but for many tokens in the queue, it
+		// is better to use $pullAll.
+		// I don't know the exact threshold here, but I'm attempting a tradeoff
+		if len(tokensToPull)*5 > len(tokensToSet) {
+			// We are removing more than 20% of the tokens, so set the content
+			if err := tb.tokenSetter(key, tokensToSet, len(tokensToPull)); err != nil {
+				return err
+			}
+		} else {
+			if err := tb.tokenRemover(key, tokensToPull); err != nil {
+				return err
+			}
 		}
-		// if err := tb.tokenRemover(key, tokensToPull); err != nil {
-		// 	return err
-		// }
 		doc.queue = remainingQueue
 	}
 	return nil
