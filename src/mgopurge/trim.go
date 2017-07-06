@@ -172,9 +172,9 @@ func (ltt *LongTxnTrimmer) findDocsToProcess(collNames []string) error {
 				ltt.txnsToProcess = append(ltt.txnsToProcess, txnId)
 			}
 			// Now we've converted everything to queue, we can drop the other data
-			doc.TxnQueue = nil
 			logger.Infof("%q document %v has %d transactions",
-				coll.Name, doc.Id, len(doc.TxnQueue))
+				coll.Name, doc.Id, len(doc.queue))
+			doc.TxnQueue = nil
 		}
 	}
 	return nil
@@ -288,6 +288,7 @@ func (ltt *LongTxnTrimmer) pullTokens(key docKey, tokens []interface{}) error {
 }
 
 func (ltt *LongTxnTrimmer) processQueue() error {
+	logger.Infof("found %d transactions that might be trimmed", len(ltt.txnsToProcess))
 	for len(ltt.txnsToProcess) > 0 {
 		// We take batches of transactions to process from the end of the stack
 		// We walk from the back so that we should be trimming values from
@@ -328,7 +329,7 @@ func (ltt *LongTxnTrimmer) Trim(collNames []string) error {
 		return err
 	}
 	ltt.docCleanupCount = len(ltt.docCache)
-	logger.Infof("cleaned up %d docs from %d tokens, removing %d transactions in %v",
+	logger.Infof("trimmed %d docs from %d tokens, removing %d transactions in %v",
 		ltt.docCleanupCount, ltt.tokensPulledCount, ltt.txnsRemovedCount, time.Since(tStart))
 	return nil
 }
