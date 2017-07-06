@@ -119,11 +119,11 @@ func (ltt *LongTxnTrimmer) checkProgress() {
 	if ltt.timer != nil && ltt.timer.isAfter() {
 		logger.Debugf("trim removed %d txns in %.3fs (skipped %d) from %s, pulled %d tokens in %.3fs",
 			ltt.txnsRemovedCount,
-			ltt.txnsRemovedTime,
+			ltt.txnsRemovedTime.Seconds(),
 			ltt.txnsNotTouched,
 			ltt.txns.Name,
 			ltt.tokensPulledCount,
-			ltt.tokensPulledTime,
+			ltt.tokensPulledTime.Seconds(),
 		)
 	}
 }
@@ -187,7 +187,7 @@ func (ltt *LongTxnTrimmer) findDocsToProcess(collNames []string) error {
 			}
 			tokenCount += len(doc.queue)
 			// Now we've converted everything to queue, we can drop the other data
-			logger.Infof("%q document %v has %d transactions",
+			logger.Infof("%q document %v has %d tokens",
 				coll.Name, doc.Id, len(doc.queue))
 			doc.TxnQueue = nil
 		}
