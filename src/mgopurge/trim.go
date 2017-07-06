@@ -77,10 +77,11 @@ type LongTxnTrimmer struct {
 
 	txnBatchSize      int
 	txnsRemovedCount  int
-	txnsNotPrepared   int
-	txnsNotAllDocs    int
+	txnsRemovedTime   time.Duration
+	txnsNotTouched    int
 	docCleanupCount   int
 	tokensPulledCount int
+	tokensPulledTime  time.Duration
 }
 
 // loadTxns ensures the transactions are in the txnCache
@@ -113,9 +114,14 @@ func (ltt *LongTxnTrimmer) loadTxns(ids []bson.ObjectId) (map[bson.ObjectId]*raw
 
 func (ltt *LongTxnTrimmer) checkProgress() {
 	if ltt.timer != nil && ltt.timer.isAfter() {
-		logger.Debugf("removed %d txns from %s, pulled %d tokens (preserved %d+%d transactions)",
-			ltt.txnsRemovedCount, ltt.txns.Name, ltt.tokensPulledCount,
-			ltt.txnsNotPrepared, ltt.txnsNotAllDocs)
+		logger.Debugf("trim removed %d txns in %.3fs (skipped %d) from %s, pulled %d tokens in %.3fs",
+			ltt.txnsRemovedCount,
+			ltt.txnsRemovedTime,
+			ltt.txnsNotTouched,
+			ltt.txns.Name,
+			ltt.tokensPulledCount,
+			ltt.tokensPulledTime,
+		)
 	}
 }
 
@@ -125,12 +131,14 @@ func (ltt *LongTxnTrimmer) removeTransactions(txnsToRemove []bson.ObjectId) erro
 		if len(batch) > ltt.txnBatchSize {
 			batch = batch[:ltt.txnBatchSize]
 		}
+		tStart := time.Now()
 		txnsToRemove = txnsToRemove[len(batch):]
 		info, err := ltt.txns.RemoveAll(bson.M{"_id": bson.M{"$in": batch}})
 		if err != nil {
 			return err
 		}
 		ltt.txnsRemovedCount += info.Removed
+		ltt.txnsRemovedTime += time.Since(tStart)
 		ltt.checkProgress()
 	}
 	return nil
@@ -140,6 +148,7 @@ func (ltt *LongTxnTrimmer) removeTransactions(txnsToRemove []bson.ObjectId) erro
 // with transaction queues that are too long. It populates the internal document
 // cache and queue of docs to process.
 func (ltt *LongTxnTrimmer) findDocsToProcess(collNames []string) error {
+	tokenCount := 0
 	seenTxnIds := make(map[bson.ObjectId]struct{})
 	for _, collName := range collNames {
 		coll := ltt.txns.Database.C(collName)
@@ -173,12 +182,14 @@ func (ltt *LongTxnTrimmer) findDocsToProcess(collNames []string) error {
 				seenTxnIds[txnId] = struct{}{}
 				ltt.txnsToProcess = append(ltt.txnsToProcess, txnId)
 			}
+			tokenCount += len(doc.queue)
 			// Now we've converted everything to queue, we can drop the other data
 			logger.Infof("%q document %v has %d transactions",
 				coll.Name, doc.Id, len(doc.queue))
 			doc.TxnQueue = nil
 		}
 	}
+	logger.Infof("found %d transactions and %d tokens that might be trimmed", len(ltt.txnsToProcess), tokenCount)
 	return nil
 }
 
@@ -189,8 +200,7 @@ type txnBatchTrimmer struct {
 	txns          map[bson.ObjectId]*rawTransaction
 	txnsToRemove  []bson.ObjectId
 
-	omitNotPreparedCount int
-	omitNotAllDocsCount  int
+	txnsSkippedCount int
 
 	txnRemover   func([]bson.ObjectId) error
 	tokenRemover func(docKey, []interface{}) error
@@ -212,7 +222,7 @@ func (tb *txnBatchTrimmer) checkTransactionsFindDocs() {
 		if txn.State != tpreparing && txn.State != tprepared {
 			// This transaction should not be pruned
 			// logger.Tracef("txn %v not in state prepared/preparing: %d", txnId, txn.State)
-			tb.omitNotPreparedCount++
+			tb.txnsSkippedCount++
 			delete(tb.txns, txnId)
 			continue
 		}
@@ -237,7 +247,7 @@ func (tb *txnBatchTrimmer) checkTransactionsFindDocs() {
 		if !foundAllDocs {
 			// We won't purge this transaction if one of the docs
 			// involved doesn't have a long transaction queues
-			tb.omitNotAllDocsCount++
+			tb.txnsSkippedCount++
 			delete(tb.txns, txnId)
 			continue
 		}
@@ -284,18 +294,19 @@ func (tb *txnBatchTrimmer) Process() error {
 }
 
 func (ltt *LongTxnTrimmer) pullTokens(key docKey, tokens []interface{}) error {
-	ltt.tokensPulledCount += len(tokens)
+	tStart := time.Now()
 	// default mgopurge includes TRACE logging
 	// logger.Tracef("removing %d tokens from %q %v", len(tokens), key.C, key.Id)
 	if err := pullTokens(ltt.txns.Database.C(key.C), key.Id, tokens); err != nil {
 		return err
 	}
+	ltt.tokensPulledCount += len(tokens)
+	ltt.tokensPulledTime += time.Since(tStart)
 	ltt.checkProgress()
 	return nil
 }
 
 func (ltt *LongTxnTrimmer) processQueue() error {
-	logger.Infof("found %d transactions that might be trimmed", len(ltt.txnsToProcess))
 	for len(ltt.txnsToProcess) > 0 {
 		// We take batches of transactions to process from the end of the stack
 		// We walk from the back so that we should be trimming values from
@@ -322,8 +333,7 @@ func (ltt *LongTxnTrimmer) processQueue() error {
 		if err := trimmer.Process(); err != nil {
 			return err
 		}
-		ltt.txnsNotPrepared += trimmer.omitNotPreparedCount
-		ltt.txnsNotAllDocs += trimmer.omitNotAllDocsCount
+		ltt.txnsNotTouched += trimmer.txnsSkippedCount
 	}
 	return nil
 }
@@ -338,8 +348,14 @@ func (ltt *LongTxnTrimmer) Trim(collNames []string) error {
 		return err
 	}
 	ltt.docCleanupCount = len(ltt.docCache)
-	logger.Infof("trimmed %d docs from %d tokens, removing %d transactions in %v",
-		ltt.docCleanupCount, ltt.tokensPulledCount, ltt.txnsRemovedCount, time.Since(tStart))
+	logger.Infof("trimmed %d docs from %d tokens (%.3fs), removing %d transactions (%.3fs) in %v",
+		ltt.docCleanupCount,
+		ltt.tokensPulledCount,
+		ltt.tokensPulledTime.Seconds(),
+		ltt.txnsRemovedCount,
+		ltt.txnsRemovedTime.Seconds(),
+		time.Since(tStart),
+	)
 	return nil
 }
 
