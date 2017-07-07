@@ -22,7 +22,10 @@ import (
 
 const txnsC = "txns"
 const txnsStashC = txnsC + ".stash"
-const machinesC = "machines"
+
+// TODO (jam): 2017-07-07 Change the stages to take a settings parameter
+// and move this into a local variable instead of a global variable.
+var txnBatchSize = defaultTxnBatchSize
 
 var controllerPrompt = `
 This program should only be used to recover from specific transaction
@@ -58,7 +61,13 @@ var allStages = []stage{
 		"Trim txn-queues that are longer than 1000",
 		func(db *mgo.Database, txns *mgo.Collection) error {
 			collections := getAllPurgeableCollections(db)
-			return TrimLongTransactionQueues(txns, 1000, collections...)
+			trimmer := &LongTxnTrimmer{
+				timer:        newSimpleTimer(15 * time.Second),
+				txns:         txns,
+				longTxnSize:  1000,
+				txnBatchSize: txnBatchSize,
+			}
+			return trimmer.Trim(collections)
 		},
 	}, {
 		"resume",
@@ -203,6 +212,8 @@ func commandLine() commandLineArgs {
 		"user for connecting to MonogDB (use \"\" to for no authentication)")
 	flags.StringVar(&a.password, "password", "",
 		"password for connecting to MonogDB")
+	flags.IntVar(&txnBatchSize, "txn-batch-size", defaultTxnBatchSize,
+		"how many transactions to process at once, higher requires more memory but completes faster")
 	var rawStages string
 	flags.StringVar(&rawStages, "stages", "",
 		"comma separated list of stages to run (default is to run all)")

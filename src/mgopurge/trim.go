@@ -62,9 +62,17 @@ func tokenToIdNonce(token interface{}) (bson.ObjectId, string, bool) {
 }
 
 // defaultTxnBatchSize is how many transactions we process per batch (affects how many
-// we will Remove() at one passand how many tokens we could pull in one pass.)
+// we will Remove() at one pass and how many tokens we could pull in one pass.)
+// On a DB with 3 docs with 200k+ txn-queues, using 50,000 needed ~800MB of memory.
+// 10,000 took about 3x longer but needed <400MB, 100,000 took half the time but
+// needed 1.4GB of memory.
 const defaultTxnBatchSize = 50000
-const maxTxnRemoveCount = 2000
+
+// maxTxnRemoveCount is the maximum number of transaction ids we will put in a
+// single RemoveAll call. This number can actually be fairly high, but it means
+// we will hang waiting for the database to perform the operation, so its a bit
+// nicer to set it a bit lower.
+const maxTxnRemoveCount = 10000
 
 // LongTxnTrimmer handles processing transaction queues that have grown unmanageable
 // to be handled by the normal Resume logic.
@@ -279,12 +287,22 @@ func (tb *txnBatchTrimmer) processDoc(key docKey, doc *txnDoc) error {
 			tokensToSet = append(tokensToSet, tokenInfo.token)
 		}
 	}
-	// for small numbers of tokens left in the queue, it is much faster
-	// to set the tokens directly, but for many tokens in the queue, it
-	// is better to use $pullAll.
-	// I don't know the exact threshold here, but I'm attempting a tradeoff
-	if len(tokensToPull)*5 > len(tokensToSet) {
-		// We are removing more than 20% of the tokens, so set the content
+	// for small numbers of tokens left in the queue it is faster to just
+	// set the absolute value. When trimming only a few it is slightly faster
+	// to pull only the ones that are being removed. Experimental tests show
+	// that the difference is small and the time is mostly dominated by the
+	// sheer number of items that are left.
+	// Ideally txnBatchSize is set high enough that you take a significant
+	// number of tokens in each pass.
+	// (extreme example is removing the last 100,000 in one pass, is nearly
+	// instant to set the value to [], but fairly slow to iterate all of
+	// them and pull them out.)
+	if len(tokensToPull)*10 > len(tokensToSet) {
+		// removing more than 10% of the tokens, we just set the whole value
+		// (empirically $set is much faster than $pullAll)
+		// note that $set isn't safe if doing concurrent accesses, but
+		// we don't allow that here. Controllers must be stopped, and
+		// only one goroutine modifies a doc at a time.
 		if err := tb.tokenSetter(key, tokensToSet, len(tokensToPull)); err != nil {
 			return err
 		}
@@ -363,14 +381,6 @@ func (ltt *LongTxnTrimmer) setTxnQueue(key docKey, tokens []string, pulledCount 
 func (ltt *LongTxnTrimmer) pullTokens(key docKey, tokens []interface{}) error {
 	// default mgopurge includes TRACE logging
 	// logger.Tracef("removing %d tokens from %q %v", len(tokens), key.C, key.Id)
-	// Note(jam): 2017-07-16 On large collections this seems to be the bulk
-	// of the time spent. We may want to revisit whether it is better to use $pullAll
-	// or whether it would be better to just rewrite the txn-queue field directly.
-	// $pullAll is traditionally used because it is safe to be done concurrently
-	// but given we have up to 300k entries in txn-queue matching those 300k
-	// entries with the ~5000 tokens we pull at a time might be a bad idea.
-	// (mongo might be implementing the pull by iterating both lists, essentially
-	// making it N*M for every pull request.)
 	remaining := tokens
 	session := ltt.txns.Database.Session.Copy()
 	defer session.Close()
@@ -396,14 +406,11 @@ func (ltt *LongTxnTrimmer) pullTokens(key docKey, tokens []interface{}) error {
 
 func (ltt *LongTxnTrimmer) processQueue() error {
 	for len(ltt.txnsToProcess) > 0 {
-		// We take batches of transactions to process from the end of the stack
-		// We walk from the back so that we should be trimming values from
-		// the end of long lists, rather than having to resize the lists
 		batch := ltt.txnsToProcess
 		if len(batch) > ltt.txnBatchSize {
-			batch = batch[len(batch)-ltt.txnBatchSize:]
+			batch = batch[:ltt.txnBatchSize]
 		}
-		ltt.txnsToProcess = ltt.txnsToProcess[:len(ltt.txnsToProcess)-len(batch)]
+		ltt.txnsToProcess = ltt.txnsToProcess[len(batch):]
 		txns, err := ltt.loadTxns(batch)
 		if err != nil {
 			return err
