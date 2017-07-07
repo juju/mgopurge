@@ -285,12 +285,10 @@ func (tb *txnBatchTrimmer) processDoc(key docKey, doc *txnDoc) error {
 	// I don't know the exact threshold here, but I'm attempting a tradeoff
 	if len(tokensToPull)*5 > len(tokensToSet) {
 		// We are removing more than 20% of the tokens, so set the content
-		logger.Debugf("setting %q %v tokens to %d", key.C, key.Id, len(tokensToSet))
 		if err := tb.tokenSetter(key, tokensToSet, len(tokensToPull)); err != nil {
 			return err
 		}
 	} else {
-		logger.Debugf("pulling %q %v %d tokens", key.C, key.Id, len(tokensToSet))
 		if err := tb.tokenRemover(key, tokensToPull); err != nil {
 			return err
 		}
@@ -314,14 +312,11 @@ func (tb *txnBatchTrimmer) processDocs() error {
 	var err error
 	for key, doc := range tb.docsToCleanup {
 		count++
+		key := key
+		doc := doc
 		go func() {
 			errCh <- tb.processDoc(key, doc)
 		}()
-		// callErr := <-errCh
-		// // save the first error
-		// if err == nil && callErr != nil {
-		// 	err = callErr
-		// }
 	}
 	for callErr := range errCh {
 		count--
