@@ -4,6 +4,7 @@ package main
 
 import (
 	"fmt"
+	"sync"
 	"time"
 
 	"gopkg.in/mgo.v2"
@@ -64,7 +65,6 @@ func tokenToIdNonce(token interface{}) (bson.ObjectId, string, bool) {
 // we will Remove() at one passand how many tokens we could pull in one pass.)
 const defaultTxnBatchSize = 50000
 const maxTxnRemoveCount = 2000
-const maxPullTokenCount = 2000
 
 // LongTxnTrimmer handles processing transaction queues that have grown unmanageable
 // to be handled by the normal Resume logic.
@@ -78,6 +78,7 @@ type LongTxnTrimmer struct {
 
 	longTxnSize int
 
+	mu                sync.Mutex
 	txnBatchSize      int
 	txnsRemovedCount  int
 	txnsRemovedTime   time.Duration
@@ -259,43 +260,79 @@ func (tb *txnBatchTrimmer) checkTransactionsFindDocs() {
 	}
 }
 
+// processDoc processes a single document to remove transactions that are present
+// in tb.txns. This can be called in parallel because it only touches the values
+// on this doc.
+func (tb *txnBatchTrimmer) processDoc(key docKey, doc *txnDoc) error {
+	tokensToPull := make([]interface{}, 0, len(tb.txnsToRemove))
+	tokensToSet := make([]string, 0, len(doc.queue))
+	remainingQueue := make([]parsedToken, 0, len(doc.queue))
+	txns := tb.txns
+	for _, tokenInfo := range doc.queue {
+		if _, ok := txns[tokenInfo.txnId]; ok {
+			// we ignore nonce, as we will pull all
+			// references to a given txn id, even if
+			// the nonce doesn't match
+			tokensToPull = append(tokensToPull, tokenInfo.token)
+		} else {
+			remainingQueue = append(remainingQueue, tokenInfo)
+			tokensToSet = append(tokensToSet, tokenInfo.token)
+		}
+	}
+	// for small numbers of tokens left in the queue, it is much faster
+	// to set the tokens directly, but for many tokens in the queue, it
+	// is better to use $pullAll.
+	// I don't know the exact threshold here, but I'm attempting a tradeoff
+	if len(tokensToPull)*5 > len(tokensToSet) {
+		// We are removing more than 20% of the tokens, so set the content
+		logger.Debugf("setting %q %v tokens to %d", key.C, key.Id, len(tokensToSet))
+		if err := tb.tokenSetter(key, tokensToSet, len(tokensToPull)); err != nil {
+			return err
+		}
+	} else {
+		logger.Debugf("pulling %q %v %d tokens", key.C, key.Id, len(tokensToSet))
+		if err := tb.tokenRemover(key, tokensToPull); err != nil {
+			return err
+		}
+	}
+	doc.queue = remainingQueue
+	return nil
+}
+
 // processDocs works through all of the docsToCleanup that were found in
 // checkTransactionsFindDocs, it removes all of the tokens that refer to transactions
 // that we are removing, and updates the in-memory cache so the doc objects no
 // longer refer to those tokens.
 func (tb *txnBatchTrimmer) processDocs() error {
-	for key, doc := range tb.docsToCleanup {
-		tokensToPull := make([]interface{}, 0, len(tb.txnsToRemove))
-		tokensToSet := make([]string, 0, len(doc.queue))
-		remainingQueue := make([]parsedToken, 0, len(doc.queue))
-		for _, tokenInfo := range doc.queue {
-			if _, ok := tb.txns[tokenInfo.txnId]; ok {
-				// we ignore nonce, as we will pull all
-				// references to a given txn id, even if
-				// the nonce doesn't match
-				tokensToPull = append(tokensToPull, tokenInfo.token)
-			} else {
-				remainingQueue = append(remainingQueue, tokenInfo)
-				tokensToSet = append(tokensToSet, tokenInfo.token)
-			}
-		}
-		// for small numbers of tokens left in the queue, it is much faster
-		// to set the tokens directly, but for many tokens in the queue, it
-		// is better to use $pullAll.
-		// I don't know the exact threshold here, but I'm attempting a tradeoff
-		if len(tokensToPull)*3 > len(tokensToSet) {
-			// We are removing more than 20% of the tokens, so set the content
-			if err := tb.tokenSetter(key, tokensToSet, len(tokensToPull)); err != nil {
-				return err
-			}
-		} else {
-			if err := tb.tokenRemover(key, tokensToPull); err != nil {
-				return err
-			}
-		}
-		doc.queue = remainingQueue
+	if len(tb.docsToCleanup) == 0 {
+		return nil
 	}
-	return nil
+	errCh := make(chan error)
+	count := 0
+	// each doc is independent, so we fork it off into another goroutine
+	// and collect the results back onto the channel.
+	var err error
+	for key, doc := range tb.docsToCleanup {
+		count++
+		go func() {
+			errCh <- tb.processDoc(key, doc)
+		}()
+		// callErr := <-errCh
+		// // save the first error
+		// if err == nil && callErr != nil {
+		// 	err = callErr
+		// }
+	}
+	for callErr := range errCh {
+		count--
+		if err == nil && callErr != nil {
+			err = callErr
+		}
+		if count <= 0 {
+			break
+		}
+	}
+	return err
 }
 
 func (tb *txnBatchTrimmer) Process() error {
@@ -313,14 +350,18 @@ func (tb *txnBatchTrimmer) Process() error {
 // setTxnQueue rewrites the entire txn-queue field to be exactly 'tokens'
 func (ltt *LongTxnTrimmer) setTxnQueue(key docKey, tokens []string, pulledCount int) error {
 	tStart := time.Now()
-	coll := ltt.txns.Database.C(key.C)
+	session := ltt.txns.Database.Session.Copy()
+	defer session.Close()
+	coll := ltt.txns.Database.C(key.C).With(session)
 	err := coll.UpdateId(key.Id, bson.M{"$set": bson.M{"txn-queue": tokens}})
 	if err != nil {
 		return err
 	}
+	ltt.mu.Lock()
 	ltt.tokensPulledCount += pulledCount
 	ltt.tokensPulledTime += time.Since(tStart)
 	ltt.checkProgress()
+	ltt.mu.Unlock()
 	return nil
 }
 
@@ -336,6 +377,9 @@ func (ltt *LongTxnTrimmer) pullTokens(key docKey, tokens []interface{}) error {
 	// (mongo might be implementing the pull by iterating both lists, essentially
 	// making it N*M for every pull request.)
 	remaining := tokens
+	session := ltt.txns.Database.Session.Copy()
+	defer session.Close()
+	coll := ltt.txns.Database.C(key.C).With(session)
 	for len(remaining) > 0 {
 		batch := remaining
 		if len(batch) > ltt.txnBatchSize {
@@ -343,12 +387,14 @@ func (ltt *LongTxnTrimmer) pullTokens(key docKey, tokens []interface{}) error {
 		}
 		tStart := time.Now()
 		remaining = remaining[len(batch):]
-		if err := pullTokens(ltt.txns.Database.C(key.C), key.Id, batch); err != nil {
+		if err := pullTokens(coll, key.Id, batch); err != nil {
 			return err
 		}
+		ltt.mu.Lock()
 		ltt.tokensPulledCount += len(batch)
 		ltt.tokensPulledTime += time.Since(tStart)
 		ltt.checkProgress()
+		ltt.mu.Unlock()
 	}
 	return nil
 }

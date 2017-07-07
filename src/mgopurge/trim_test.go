@@ -94,7 +94,7 @@ func (s *TrimSuite) TestTrimmedSingleDoc(c *gc.C) {
 	trimmer := &LongTxnTrimmer{
 		txns:         s.txns,
 		longTxnSize:  50,
-		txnBatchSize: 10,
+		txnBatchSize: 5,
 	}
 	count, err := s.txns.Count()
 	c.Assert(err, jc.ErrorIsNil)
