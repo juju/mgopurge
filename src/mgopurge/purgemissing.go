@@ -62,6 +62,9 @@ func PurgeMissing(tc, sc *mgo.Collection, collNames ...string) error {
 			if len(badTokens) > 0 {
 				logger.Debugf("document %s/%v: purging %d orphaned or invalid txn tokens",
 					collName, tdoc.Id, len(badTokens))
+				if len(badTokens) < 10 {
+					logger.Debugf("tokens: %v", badTokens)
+				}
 				if err := pullTokens(c, tdoc.Id, badTokens); err != nil {
 					return err
 				}

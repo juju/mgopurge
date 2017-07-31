@@ -1055,7 +1055,7 @@ type inlineBadKeyMap struct {
 }
 type inlineUnexported struct {
 	M          map[string]interface{} ",inline"
-	unexported         ",inline"
+	unexported ",inline"
 }
 type unexported struct {
 	A int

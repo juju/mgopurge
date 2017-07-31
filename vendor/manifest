@@ -2,9 +2,27 @@
 	"version": 0,
 	"dependencies": [
 		{
+			"importpath": "github.com/juju/errors",
+			"repository": "https://github.com/juju/errors",
+			"revision": "c7d06af17c68cd34c835053720b21f6549d9b0ee",
+			"branch": "master"
+		},
+		{
 			"importpath": "github.com/juju/loggo",
 			"repository": "https://github.com/juju/loggo",
 			"revision": "8232ab8918d91c72af1a9fb94d3edbe31d88b790",
+			"branch": "master"
+		},
+		{
+			"importpath": "github.com/juju/retry",
+			"repository": "https://github.com/juju/retry",
+			"revision": "1998d01ba1c3eeb4a4728c4a50660025b2fe7c8f",
+			"branch": "master"
+		},
+		{
+			"importpath": "github.com/juju/testing",
+			"repository": "https://github.com/juju/testing",
+			"revision": "2fe0e88cf2321d801acedd2b4f0d7f63735fb732",
 			"branch": "master"
 		},
 		{
@@ -12,6 +30,25 @@
 			"repository": "https://github.com/juju/txn",
 			"revision": "941c396af5296a396a375bd88549552bd7a40dcd",
 			"branch": "master"
+		},
+		{
+			"importpath": "github.com/juju/utils",
+			"repository": "https://github.com/juju/utils",
+			"revision": "cfc83907d6929f2b7726f3baafa99c71f648e562",
+			"branch": "master"
+		},
+		{
+			"importpath": "github.com/juju/version",
+			"repository": "https://github.com/juju/version",
+			"revision": "1f41e27e54f21acccf9b2dddae063a782a8a7ceb",
+			"branch": "master"
+		},
+		{
+			"importpath": "golang.org/x/crypto/pbkdf2",
+			"repository": "https://go.googlesource.com/crypto",
+			"revision": "51714a8c4ac1764f07ab4127d7f739351ced4759",
+			"branch": "master",
+			"path": "/pbkdf2"
 		},
 		{
 			"importpath": "gopkg.in/check.v1",
@@ -30,6 +67,12 @@
 			"repository": "https://gopkg.in/tomb.v2",
 			"revision": "14b3d72120e8d10ea6e6b7f87f7175734b1faab8",
 			"branch": "v2"
+		},
+		{
+			"importpath": "gopkg.in/yaml.v2",
+			"repository": "https://gopkg.in/yaml.v2",
+			"revision": "cd8b52f8269e0feb286dfeef29f8fe4d5b397e0b",
+			"branch": "master"
 		}
 	]
 }
