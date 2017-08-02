@@ -37,7 +37,17 @@ See `./mgopurge --help` for further information.
 ## Building
 
 This project uses [gb] to manage its dependencies. In order to build
-mgopurge, install `gb` then run `make`. In order to build a version
-for release run `make release`.
+mgopurge, install `gb` then run `make`. 
+
+## Releases 
+
+In order to build a release version:
+* Ensure all changes are merged
+* Create an annotated tag for the release, for example: `git tag -a v1.6 -m "1.6 release"`
+* Run `make release` (the git tag will extracted and included in the binary)
+* Check binary reports the expected version: `bin/mgopurge -version`
+* Push the tag, for example: `git push origin v1.7`
+
+Then create the release entry at https://github.com/juju/mgopurge/releases, uploading the binary you just built.
 
 [gb]: https://getgb.io/
