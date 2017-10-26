@@ -6,6 +6,7 @@ package main
 import (
 	"errors"
 	"fmt"
+	"strings"
 
 	"gopkg.in/mgo.v2"
 	"gopkg.in/mgo.v2/bson"
@@ -62,6 +63,9 @@ func compactAll(db *mgo.Database) error {
 		return fmt.Errorf("obtaining collection names: %v", err)
 	}
 	for _, name := range names {
+		if strings.HasPrefix(name, "system.") {
+			continue
+		}
 		logger.Infof("compacting %s", name)
 		err := db.Run(bson.D{
 			{"compact", name},
