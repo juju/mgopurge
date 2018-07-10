@@ -27,9 +27,16 @@
 		},
 		{
 			"importpath": "github.com/juju/txn",
-			"repository": "https://github.com/juju/txn",
-			"revision": "941c396af5296a396a375bd88549552bd7a40dcd",
-			"branch": "master"
+			"repository": "https://github.com/jameinel/juju-txn",
+			"revision": "489fd1b39dc8c9c81bcafe25704b0f62af2af373",
+			"branch": "txn-limit-max-txns-1771906"
+		},
+		{
+			"importpath": "github.com/juju/utils/clock",
+			"repository": "https://github.com/juju/utils",
+			"revision": "c746c6e86f4fb2a04bc08d66b7a0f7e900d9cbab",
+			"branch": "master",
+			"path": "/clock"
 		},
 		{
 			"importpath": "github.com/juju/utils",

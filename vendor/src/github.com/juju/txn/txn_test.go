@@ -5,6 +5,7 @@ package txn_test
 
 import (
 	"errors"
+	"time"
 
 	"github.com/juju/testing"
 	gc "gopkg.in/check.v1"
@@ -40,7 +41,9 @@ func (s *txnSuite) SetUpTest(c *gc.C) {
 	s.MgoSuite.SetUpTest(c)
 	db := s.Session.DB("juju")
 	s.collection = db.C("test")
-	s.txnRunner = jujutxn.NewRunner(jujutxn.RunnerParams{Database: db})
+	s.txnRunner = jujutxn.NewRunner(jujutxn.RunnerParams{
+		Database: db,
+	})
 }
 
 func (s *txnSuite) TearDownTest(c *gc.C) {
@@ -312,37 +315,51 @@ func (s *txnSuite) TestRunFailureAlwaysUnexpectedMessage(c *gc.C) {
 }
 
 func (s *txnSuite) TestRunTransactionObserver(c *gc.C) {
-	type args struct {
-		ops []txn.Op
-		err error
-	}
-	var calls []args
+	var calls []jujutxn.ObservedTransaction
+	clock := testing.NewClock(time.Now())
 	runner := jujutxn.NewRunner(jujutxn.RunnerParams{
-		RunTransactionObserver: func(ops []txn.Op, err error) {
-			calls = append(calls, args{ops, err})
+		RunTransactionObserver: func(txn jujutxn.ObservedTransaction) {
+			calls = append(calls, txn)
 		},
+		Clock: clock,
 	})
-	fake := &fakeRunner{errors: []error{
-		txn.ErrAborted,
-		nil,
-	}}
+	fake := &fakeRunner{
+		errors: []error{
+			txn.ErrAborted,
+			nil,
+		},
+		durations: []time.Duration{
+			time.Second,
+			100 * time.Millisecond,
+		},
+		clock: clock,
+	}
 	jujutxn.SetRunnerFunc(runner, fake.new)
-	ops := []txn.Op{{}}
+	ops := []txn.Op{{
+		C:      "testColl",
+		Id:     "testId",
+		Assert: bson.D{{"attr", "value"}},
+		Update: bson.M{"$set": bson.M{"attr": "newvalue"}},
+	}}
 	buildTxn := func(attempt int) ([]txn.Op, error) {
 		return ops, nil
 	}
 	err := runner.Run(buildTxn)
 	c.Check(err, gc.IsNil)
 	c.Check(calls, gc.HasLen, 2)
-	c.Check(calls[0].ops, gc.DeepEquals, ops)
-	c.Check(calls[0].err, gc.Equals, txn.ErrAborted)
-	c.Check(calls[1].ops, gc.DeepEquals, ops)
-	c.Check(calls[1].err, gc.IsNil)
+	c.Check(calls[0].Ops, gc.DeepEquals, ops)
+	c.Check(calls[0].Error, gc.Equals, txn.ErrAborted)
+	c.Check(calls[0].Duration, gc.Equals, time.Second)
+	c.Check(calls[1].Ops, gc.DeepEquals, ops)
+	c.Check(calls[1].Error, gc.IsNil)
+	c.Check(calls[1].Duration, gc.Equals, 100*time.Millisecond)
 }
 
 type fakeRunner struct {
 	jujutxn.TxnRunner
-	errors []error
+	errors    []error
+	durations []time.Duration
+	clock     *testing.Clock
 }
 
 // Since a new transaction runner is created each time the code
@@ -353,6 +370,10 @@ func (f *fakeRunner) new() jujutxn.TxnRunner {
 }
 
 func (f *fakeRunner) Run([]txn.Op, bson.ObjectId, interface{}) error {
+	if len(f.durations) > 0 && f.clock != nil {
+		f.clock.Advance(f.durations[0])
+		f.durations = f.durations[1:]
+	}
 	if len(f.errors) == 0 {
 		return nil
 	}
