@@ -22,10 +22,12 @@ import (
 
 const txnsC = "txns"
 const txnsStashC = txnsC + ".stash"
+const defaultMaxTxnsToProcess = 1*1000*100
 
 // TODO (jam): 2017-07-07 Change the stages to take a settings parameter
 // and move this into a local variable instead of a global variable.
 var txnBatchSize = defaultTxnBatchSize
+var maxTxnsToProcess = defaultMaxTxnsToProcess
 
 var controllerPrompt = `
 This program should only be used to recover from specific transaction
@@ -79,16 +81,26 @@ var allStages = []stage{
 		"prune",
 		"Prune finalised transactions",
 		func(db *mgo.Database, txns *mgo.Collection) error {
-			stats, err := jujutxn.CleanAndPrune(jujutxn.CleanAndPruneArgs{
-				Txns:    txns,
-				MaxTime: time.Now().Add(-time.Hour),
-				MaxTransactionsToProcess: 1*1000*1000,
-			})
-			logger.Infof("clean and prune cleaned %d docs in %d collections\n"+
-				"  removed %d transactions and %d stash documents",
-				stats.DocsCleaned, stats.CollectionsInspected,
-				stats.TransactionsRemoved, stats.StashDocumentsRemoved)
-			return err
+			for {
+				stats, err := jujutxn.CleanAndPrune(jujutxn.CleanAndPruneArgs{
+					Txns:    txns,
+					MaxTime: time.Now().Add(-time.Hour),
+					MaxTransactionsToProcess: uint64(maxTxnsToProcess),
+				})
+				logger.Infof("clean and prune cleaned %d docs in %d collections\n"+
+					"  removed %d transactions and %d stash documents",
+					stats.DocsCleaned, stats.CollectionsInspected,
+					stats.TransactionsRemoved, stats.StashDocumentsRemoved)
+				if err != nil {
+					return err
+				}
+				if stats.ShouldRetry {
+					logger.Infof("Not all transactions processed, running another clean step")
+				} else {
+					break
+				}
+			}
+			return nil
 		},
 	}, {
 		"compact",
@@ -223,7 +235,9 @@ func commandLine() commandLineArgs {
 	flags.StringVar(&a.password, "password", "",
 		"password for connecting to MonogDB")
 	flags.IntVar(&txnBatchSize, "txn-batch-size", defaultTxnBatchSize,
-		"how many transactions to process at once, higher requires more memory but completes faster")
+		"how many transactions to prune at once, higher requires more memory but completes faster")
+	flags.IntVar(&maxTxnsToProcess, "max-txns", defaultMaxTxnsToProcess,
+		"how many transactions to consider completed per pass")
 	var rawStages string
 	flags.StringVar(&rawStages, "stages", "",
 		"comma separated list of stages to run (default is to run all)")
