@@ -85,7 +85,7 @@ var allStages = []stage{
 				stats, err := jujutxn.CleanAndPrune(jujutxn.CleanAndPruneArgs{
 					Txns:    txns,
 					MaxTime: time.Now().Add(-time.Hour),
-					MaxTransactionsToProcess: uint64(maxTxnsToProcess),
+					MaxTransactionsToProcess: maxTxnsToProcess,
 				})
 				logger.Infof("clean and prune cleaned %d docs in %d collections\n"+
 					"  removed %d transactions and %d stash documents",

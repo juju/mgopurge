@@ -1,12 +1,16 @@
+// Copyright 2018 Canonical Ltd.
+// Licensed under the LGPLv3, see LICENCE file for details.
+
 package utils
 
 import (
-	"context"
 	"fmt"
 	"sync"
 	"time"
 
-	"github.com/juju/utils/clock"
+	"golang.org/x/net/context"
+
+	"github.com/juju/clock"
 )
 
 // timerCtx is an implementation of context.Context that

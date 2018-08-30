@@ -2,6 +2,12 @@
 	"version": 0,
 	"dependencies": [
 		{
+			"importpath": "github.com/juju/clock",
+			"repository": "https://github.com/juju/clock",
+			"revision": "bab88fc672997ef02d03f85310182d97a93dee21",
+			"branch": "master"
+		},
+		{
 			"importpath": "github.com/juju/errors",
 			"repository": "https://github.com/juju/errors",
 			"revision": "c7d06af17c68cd34c835053720b21f6549d9b0ee",
@@ -22,26 +28,19 @@
 		{
 			"importpath": "github.com/juju/testing",
 			"repository": "https://github.com/juju/testing",
-			"revision": "2fe0e88cf2321d801acedd2b4f0d7f63735fb732",
+			"revision": "b0b89ba330f22548fba865dd0e1d85a44e9cd7dd",
 			"branch": "master"
 		},
 		{
 			"importpath": "github.com/juju/txn",
-			"repository": "https://github.com/jameinel/juju-txn",
-			"revision": "489fd1b39dc8c9c81bcafe25704b0f62af2af373",
-			"branch": "txn-limit-max-txns-1771906"
-		},
-		{
-			"importpath": "github.com/juju/utils/clock",
-			"repository": "https://github.com/juju/utils",
-			"revision": "c746c6e86f4fb2a04bc08d66b7a0f7e900d9cbab",
-			"branch": "master",
-			"path": "/clock"
+			"repository": "https://github.com/juju/txn",
+			"revision": "f08211fa34f20cae79efd3dde0f54c77238292c3",
+			"branch": "master"
 		},
 		{
 			"importpath": "github.com/juju/utils",
 			"repository": "https://github.com/juju/utils",
-			"revision": "cfc83907d6929f2b7726f3baafa99c71f648e562",
+			"revision": "bf9cc5bdd62dabc40b7f634b39a5e2dc44d44c45",
 			"branch": "master"
 		},
 		{
@@ -51,6 +50,18 @@
 			"branch": "master"
 		},
 		{
+			"importpath": "github.com/kr/pretty",
+			"repository": "https://github.com/kr/pretty",
+			"revision": "73f6ac0b30a98e433b289500d779f50c1a6f0712",
+			"branch": "main"
+		},
+		{
+			"importpath": "github.com/kr/text",
+			"repository": "https://github.com/kr/text",
+			"revision": "e2ffdb16a802fe2bb95e2e35ff34f0e53aeef34f",
+			"branch": "main"
+		},
+		{
 			"importpath": "golang.org/x/crypto/pbkdf2",
 			"repository": "https://go.googlesource.com/crypto",
 			"revision": "51714a8c4ac1764f07ab4127d7f739351ced4759",
@@ -58,9 +69,16 @@
 			"path": "/pbkdf2"
 		},
 		{
+			"importpath": "golang.org/x/net/context",
+			"repository": "https://go.googlesource.com/net",
+			"revision": "8a410e7b638dca158bf9e766925842f6651ff828",
+			"branch": "master",
+			"path": "/context"
+		},
+		{
 			"importpath": "gopkg.in/check.v1",
 			"repository": "https://gopkg.in/check.v1",
-			"revision": "4f90aeace3a26ad7021961c297b22c42160c7b25",
+			"revision": "788fd78401277ebd861206a03c884797c6ec5541",
 			"branch": "v1"
 		},
 		{

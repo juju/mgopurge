@@ -50,6 +50,7 @@ const (
 	// we aren't removing.
 	maxIterCount = 5
 
+	// maxMemoryTokens caps our in-memory cache. When it is full, we will
 	// apply our current list of items to process, and then flag the loop
 	// to run again. At 100k the maximum memory was around 200MB.
 	maxMemoryTokens = 50000
@@ -80,6 +81,9 @@ func validatePruneOptions(pruneOptions *PruneOptions) {
 	if pruneOptions.MaxNewTransactions == 0 {
 		pruneOptions.MaxNewTransactions = defaultMaxNewTransactions
 	}
+	if pruneOptions.MaxBatches <= 0 {
+		pruneOptions.MaxBatches = 1
+	}
 }
 
 func shouldPrune(oldCount, newCount int, pruneOptions PruneOptions) (bool, string) {
@@ -102,6 +106,7 @@ func shouldPrune(oldCount, newCount int, pruneOptions PruneOptions) (bool, strin
 
 func maybePrune(db *mgo.Database, txnsName string, pruneOpts PruneOptions) error {
 	validatePruneOptions(&pruneOpts)
+	logger.Debugf("validated pruneOpts: %#v", pruneOpts)
 	txnsPrune := db.C(txnsPruneC(txnsName))
 	txns := db.C(txnsName)
 	txnsStashName := txnsName + ".stash"
@@ -132,28 +137,55 @@ func maybePrune(db *mgo.Database, txnsName string, pruneOpts PruneOptions) error
 		return fmt.Errorf("failed to retrieve starting %q count: %v", txnsStashName, err)
 	}
 
-	stats, err := CleanAndPrune(CleanAndPruneArgs{
-		Txns:      txns,
-		TxnsCount: txnsCount,
-		MaxTime:   pruneOpts.MaxTime,
-	})
-	completed := time.Now()
+	var stats CleanupStats
+	var txnsCountAfter int
+	var stashDocsAfter int
+	txnsCountBefore := txnsCount
+	batchCount := 0
+	wantsRetry := false
+	for ; batchCount < pruneOpts.MaxBatches; batchCount++ {
+		// Note: jam 2018-08-16 If there are lots of txns that cannot be
+		// pruned, then batch size will mean we end up looking at the same
+		// transactions repeatedly. However, as long as the queries prefer
+		// old transactions, the chances that those are stale is low.
+		batchStarted := time.Now()
+		batchStats, err := CleanAndPrune(CleanAndPruneArgs{
+			Txns:                     txns,
+			TxnsCount:                txnsCount,
+			MaxTime:                  pruneOpts.MaxTime,
+			MaxTransactionsToProcess: pruneOpts.MaxBatchTransactions,
+		})
 
-	txnsCountAfter, err := txns.Count()
-	if err != nil {
-		return fmt.Errorf("failed to retrieve final txns count: %v", err)
-	}
-	stashDocsAfter, err := txnsStash.Count()
-	if err != nil {
-		return fmt.Errorf("failed to retrieve final %q count: %v", txnsStashName, err)
+		txnsCountAfter, err = txns.Count()
+		if err != nil {
+			return fmt.Errorf("failed to retrieve final txns count: %v", err)
+		}
+		stashDocsAfter, err = txnsStash.Count()
+		if err != nil {
+			return fmt.Errorf("failed to retrieve final %q count: %v", txnsStashName, err)
+		}
+		stats.CollectionsInspected += batchStats.CollectionsInspected
+		stats.DocsInspected += batchStats.DocsInspected
+		stats.DocsCleaned += batchStats.DocsCleaned
+		stats.StashDocumentsRemoved += batchStats.StashDocumentsRemoved
+		stats.TransactionsRemoved += batchStats.TransactionsRemoved
+		wantsRetry = batchStats.ShouldRetry
+		if !batchStats.ShouldRetry {
+			break
+		}
+		logger.Infof("txn batch pruned in %v. txns now: %d, inspected %d collections, %d docs (%d cleaned)\n   removed %d stash docs and %d txn docs",
+			time.Since(batchStarted), txnsCountAfter, stats.CollectionsInspected, stats.DocsInspected, stats.DocsCleaned, stats.StashDocumentsRemoved, stats.TransactionsRemoved)
+		txnsCount = txnsCountAfter
 	}
 	elapsed := time.Since(started)
-	logger.Infof("txn pruning complete after %v. txns now: %d, inspected %d collections, %d docs (%d cleaned)\n   removed %d stash docs and %d txn docs",
-		elapsed, txnsCountAfter, stats.CollectionsInspected, stats.DocsInspected, stats.DocsCleaned, stats.StashDocumentsRemoved, stats.TransactionsRemoved)
-	return writePruneTxnsCount(txnsPrune, started, completed, txnsCount, txnsCountAfter,
+	if wantsRetry {
+		logger.Warningf("after %d passes, we still think there are more transactions to be pruned", batchCount)
+	}
+	logger.Infof("txn pruning complete after %v in %d batches. txns now: %d, inspected %d collections, %d docs (%d cleaned)\n   removed %d stash docs and %d txn docs",
+		elapsed, batchCount, txnsCountAfter, stats.CollectionsInspected, stats.DocsInspected, stats.DocsCleaned, stats.StashDocumentsRemoved, stats.TransactionsRemoved)
+	completed := time.Now()
+	return writePruneTxnsCount(txnsPrune, started, completed, txnsCountBefore, txnsCountAfter,
 		stashDocsBefore, stashDocsAfter)
-
-	return nil
 }
 
 // CleanAndPruneArgs specifies the parameters required by CleanAndPrune.
@@ -177,7 +209,7 @@ type CleanAndPruneArgs struct {
 
 	// MaxTransactionsToProcess defines how many completed transactions that we will evaluate in this batch.
 	// A value of 0 indicates we should evaluate all completed transactions.
-	MaxTransactionsToProcess uint64
+	MaxTransactionsToProcess int
 }
 
 func (args *CleanAndPruneArgs) validate() error {
@@ -237,7 +269,7 @@ func CleanAndPrune(args CleanAndPruneArgs) (CleanupStats, error) {
 	txnsStashName := args.Txns.Name + ".stash"
 	txnsStash := db.C(txnsStashName)
 
-	if oracle.Count() > int(float64(args.MaxTransactionsToProcess)*0.9) {
+	if args.MaxTransactionsToProcess > 0 && oracle.Count() > int(float64(args.MaxTransactionsToProcess)*0.9) {
 		stats.ShouldRetry = true
 	}
 	if err := cleanupStash(oracle, txnsStash, &stats); err != nil { // XXX
@@ -254,7 +286,7 @@ func CleanAndPrune(args CleanAndPruneArgs) (CleanupStats, error) {
 	return stats, nil
 }
 
-func getOracle(args CleanAndPruneArgs, maxMemoryTxns int, maxTxns uint64) (Oracle, func(), error) {
+func getOracle(args CleanAndPruneArgs, maxMemoryTxns int, maxTxns int) (Oracle, func(), error) {
 	// If we don't have very many transactions, just use the in-memory version
 	if args.TxnsCount < maxMemoryTxns {
 		return NewMemOracle(args.Txns, args.MaxTime, maxTxns)

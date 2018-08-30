@@ -85,7 +85,7 @@ func completedOldTransactionMatch(timestamp time.Time) bson.M {
 // that any resources are freed.
 // thresholdTime is used to omit transactions that are newer than this time
 // (eg, don't consider transactions that are less than 1 hr old to be considered completed yet.)
-func NewDBOracle(txns *mgo.Collection, thresholdTime time.Time, maxTxns uint64) (*DBOracle, func(), error) {
+func NewDBOracle(txns *mgo.Collection, thresholdTime time.Time, maxTxns int) (*DBOracle, func(), error) {
 	oracle := &DBOracle{
 		db:            txns.Database,
 		txns:          txns,
@@ -108,8 +108,7 @@ type DBOracle struct {
 	txns            *mgo.Collection
 	working         *mgo.Collection
 	thresholdTime   time.Time
-	maxTxns         uint64
-	shouldRetry     bool
+	maxTxns         int
 	usingMongoOut   bool
 	checkedTokens   uint64
 	completedTokens uint64
@@ -128,7 +127,7 @@ func (o *DBOracle) prepareWorkingDirectly() error {
 	query.Select(bson.M{"_id": 1})
 	query.Batch(maxBatchDocs)
 	if o.maxTxns > 0 {
-		query.Limit(int(o.maxTxns))
+		query.Limit(o.maxTxns)
 	}
 	iter := query.Iter()
 	var txnDoc struct {
@@ -153,7 +152,6 @@ func (o *DBOracle) prepareWorkingDirectly() error {
 		docsToInsert = docsToInsert[:0]
 		return err
 	}
-	count := uint64(0)
 	for iter.Next(&txnDoc) {
 		aCopy := txnDoc
 		docsToInsert = append(docsToInsert, aCopy)
@@ -165,7 +163,6 @@ func (o *DBOracle) prepareWorkingDirectly() error {
 		if t.isAfter() {
 			logger.Debugf("copied %d documents", docCount)
 		}
-		count++
 	}
 	if err := flush(); err != nil {
 		return err
@@ -326,7 +323,7 @@ func (o *DBOracle) IterTxns() (OracleIterator, error) {
 type MemOracle struct {
 	txns            *mgo.Collection
 	thresholdTime   time.Time
-	maxTxns         uint64
+	maxTxns         int
 	completed       map[bson.ObjectId]struct{}
 	checkedTokens   uint64
 	completedTokens uint64
@@ -335,7 +332,7 @@ type MemOracle struct {
 
 // NewMemOracle uses an in-memory map to manage the queue of  remaining
 // transactions.
-func NewMemOracle(txns *mgo.Collection, thresholdTime time.Time, maxTxns uint64) (*MemOracle, func(), error) {
+func NewMemOracle(txns *mgo.Collection, thresholdTime time.Time, maxTxns int) (*MemOracle, func(), error) {
 	oracle := &MemOracle{
 		txns:          txns,
 		maxTxns:       maxTxns,
