@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/juju/loggo"
+	"github.com/juju/utils/clock"
 	"gopkg.in/mgo.v2"
 	"gopkg.in/mgo.v2/bson"
 	"gopkg.in/mgo.v2/txn"
@@ -111,12 +112,24 @@ type transactionRunner struct {
 	transactionCollectionName string
 	changeLogName             string
 	testHooks                 chan ([]TestHook)
-	runTransactionObserver    func([]txn.Op, error)
+	runTransactionObserver    func(ObservedTransaction)
+	clock                     clock.Clock
 
 	newRunner func() txnRunner
 }
 
 var _ Runner = (*transactionRunner)(nil)
+
+// ObservedTransaction is a struct that is passed to RunTransactionObserver whenever a
+// transaction is run.
+type ObservedTransaction struct {
+	// Ops is the operations that were performed
+	Ops []txn.Op
+	// Error is the error returned from running the operation, might be nil
+	Error error
+	// Duration is length of time it took to run the operation
+	Duration time.Duration
+}
 
 // RunnerParams are used to construct a new transaction runner.
 // Only the Database value is mandatory, defaults will be used for
@@ -137,7 +150,11 @@ type RunnerParams struct {
 	// RunTransactionObserver, if non-nil, will be called when
 	// a Run or RunTransaction call has completed. It will be
 	// passed the txn.Ops and the error result.
-	RunTransactionObserver func([]txn.Op, error)
+	RunTransactionObserver func(ObservedTransaction)
+
+	// Clock is an optional clock to use. If Clock is nil, clock.WallClock will
+	// be used.
+	Clock clock.Clock
 }
 
 // NewRunner returns a Runner which runs transactions for the database specified in params.
@@ -149,6 +166,7 @@ func NewRunner(params RunnerParams) Runner {
 		transactionCollectionName: params.TransactionCollectionName,
 		changeLogName:             params.ChangeLogName,
 		runTransactionObserver:    params.RunTransactionObserver,
+		clock: params.Clock,
 	}
 	if txnRunner.transactionCollectionName == "" {
 		txnRunner.transactionCollectionName = defaultTxnCollectionName
@@ -159,6 +177,11 @@ func NewRunner(params RunnerParams) Runner {
 	txnRunner.testHooks = make(chan ([]TestHook), 1)
 	txnRunner.testHooks <- nil
 	txnRunner.newRunner = txnRunner.newRunnerImpl
+	if txnRunner.clock == nil {
+		// We allow callers to pass in a nil clock because it is only used if
+		// they also specify a RunTransactionObserver.
+		txnRunner.clock = clock.WallClock
+	}
 	return txnRunner
 }
 
@@ -226,10 +249,16 @@ func (tr *transactionRunner) RunTransaction(ops []txn.Op) error {
 			logger.Infof("transaction 'before' hook end")
 		}
 	}
+	start := tr.clock.Now()
 	runner := tr.newRunner()
 	err := runner.Run(ops, "", nil)
+	delta := tr.clock.Now().Sub(start)
 	if tr.runTransactionObserver != nil {
-		tr.runTransactionObserver(ops, err)
+		tr.runTransactionObserver(ObservedTransaction{
+			Ops:      ops,
+			Error:    err,
+			Duration: delta,
+		})
 	}
 	return err
 }

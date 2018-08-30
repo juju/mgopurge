@@ -71,6 +71,7 @@ func checkMongoSupportsOut(db *mgo.Database) bool {
 // timestamp. If the timestamp is empty,then only the completed status is evaluated.
 // The returned object is suitable for being passed to a $match or a Find() operation.
 func completedOldTransactionMatch(timestamp time.Time) bson.M {
+	// This used to use $in but that's much slower than $gte.
 	match := bson.M{"s": bson.M{"$gte": taborted}}
 	if !timestamp.IsZero() {
 		match["_id"] = bson.M{"$lt": bson.NewObjectIdWithTime(timestamp)}
@@ -84,10 +85,11 @@ func completedOldTransactionMatch(timestamp time.Time) bson.M {
 // that any resources are freed.
 // thresholdTime is used to omit transactions that are newer than this time
 // (eg, don't consider transactions that are less than 1 hr old to be considered completed yet.)
-func NewDBOracle(txns *mgo.Collection, thresholdTime time.Time) (*DBOracle, func(), error) {
+func NewDBOracle(txns *mgo.Collection, thresholdTime time.Time, maxTxns uint64) (*DBOracle, func(), error) {
 	oracle := &DBOracle{
 		db:            txns.Database,
 		txns:          txns,
+		maxTxns:       maxTxns,
 		thresholdTime: thresholdTime,
 		usingMongoOut: checkMongoSupportsOut(txns.Database),
 	}
@@ -106,6 +108,8 @@ type DBOracle struct {
 	txns            *mgo.Collection
 	working         *mgo.Collection
 	thresholdTime   time.Time
+	maxTxns         uint64
+	shouldRetry     bool
 	usingMongoOut   bool
 	checkedTokens   uint64
 	completedTokens uint64
@@ -123,6 +127,9 @@ func (o *DBOracle) prepareWorkingDirectly() error {
 	query := o.txns.Find(completedOldTransactionMatch(o.thresholdTime))
 	query.Select(bson.M{"_id": 1})
 	query.Batch(maxBatchDocs)
+	if o.maxTxns > 0 {
+		query.Limit(int(o.maxTxns))
+	}
 	iter := query.Iter()
 	var txnDoc struct {
 		Id bson.ObjectId `bson:"_id"`
@@ -146,6 +153,7 @@ func (o *DBOracle) prepareWorkingDirectly() error {
 		docsToInsert = docsToInsert[:0]
 		return err
 	}
+	count := uint64(0)
 	for iter.Next(&txnDoc) {
 		aCopy := txnDoc
 		docsToInsert = append(docsToInsert, aCopy)
@@ -157,6 +165,7 @@ func (o *DBOracle) prepareWorkingDirectly() error {
 		if t.isAfter() {
 			logger.Debugf("copied %d documents", docCount)
 		}
+		count++
 	}
 	if err := flush(); err != nil {
 		return err
@@ -169,11 +178,13 @@ func (o *DBOracle) prepareWorkingDirectly() error {
 func (o *DBOracle) prepareWorkingWithPipeline() error {
 	logger.Debugf("searching for transactions older than %s", o.thresholdTime)
 	pipeline := []bson.M{
-		// This used to use $in but that's much slower than $gte.
 		{"$match": completedOldTransactionMatch(o.thresholdTime)},
 		{"$project": bson.M{"_id": 1}},
-		{"$out": o.working.Name},
 	}
+	if o.maxTxns > 0 {
+		pipeline = append(pipeline, bson.M{"$limit": o.maxTxns})
+	}
+	pipeline = append(pipeline, bson.M{"$out": o.working.Name})
 	pipe := o.txns.Pipe(pipeline)
 	pipe.Batch(maxBatchDocs)
 	pipe.AllowDiskUse()
@@ -315,6 +326,7 @@ func (o *DBOracle) IterTxns() (OracleIterator, error) {
 type MemOracle struct {
 	txns            *mgo.Collection
 	thresholdTime   time.Time
+	maxTxns         uint64
 	completed       map[bson.ObjectId]struct{}
 	checkedTokens   uint64
 	completedTokens uint64
@@ -323,9 +335,10 @@ type MemOracle struct {
 
 // NewMemOracle uses an in-memory map to manage the queue of  remaining
 // transactions.
-func NewMemOracle(txns *mgo.Collection, thresholdTime time.Time) (*MemOracle, func(), error) {
+func NewMemOracle(txns *mgo.Collection, thresholdTime time.Time, maxTxns uint64) (*MemOracle, func(), error) {
 	oracle := &MemOracle{
 		txns:          txns,
+		maxTxns:       maxTxns,
 		thresholdTime: thresholdTime,
 	}
 	err := oracle.prepare()
@@ -343,11 +356,15 @@ func (o *MemOracle) prepare() error {
 	// Max memory consumed when dealing with 36M transactions was around 4GB
 	// when testing this.
 	logger.Debugf("loading all completed transactions")
-	pipe := o.txns.Pipe([]bson.M{
+	pipeline := []bson.M{
 		// This used to use $in but that's much slower than $gte.
 		{"$match": completedOldTransactionMatch(o.thresholdTime)},
 		{"$project": bson.M{"_id": 1}},
-	})
+	}
+	if o.maxTxns > 0 {
+		pipeline = append(pipeline, bson.M{"$limit": o.maxTxns})
+	}
+	pipe := o.txns.Pipe(pipeline)
 	pipe.Batch(maxBatchDocs)
 	pipe.AllowDiskUse()
 	var txnId struct {

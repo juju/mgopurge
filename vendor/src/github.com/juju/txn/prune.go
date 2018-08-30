@@ -50,7 +50,6 @@ const (
 	// we aren't removing.
 	maxIterCount = 5
 
-	// maxMemoryTokens caps our in-memory cache. When it is full, we will
 	// apply our current list of items to process, and then flag the loop
 	// to run again. At 100k the maximum memory was around 200MB.
 	maxMemoryTokens = 50000
@@ -175,6 +174,10 @@ type CleanAndPruneArgs struct {
 	// that we will actually prune. Only transactions that were created
 	// before this threshold will be pruned.
 	MaxTime time.Time
+
+	// MaxTransactionsToProcess defines how many completed transactions that we will evaluate in this batch.
+	// A value of 0 indicates we should evaluate all completed transactions.
+	MaxTransactionsToProcess uint64
 }
 
 func (args *CleanAndPruneArgs) validate() error {
@@ -202,6 +205,9 @@ type CleanupStats struct {
 
 	// StashDocumentsRemoved is how many documents we remove from txns
 	TransactionsRemoved int
+
+	// ShouldRetry indicates that we think this cleanup was not complete due to too many txns to process. We recommend running it again.
+	ShouldRetry bool
 }
 
 // CleanAndPrune runs the cleanup steps, and then follows up with pruning all
@@ -223,7 +229,7 @@ func CleanAndPrune(args CleanAndPruneArgs) (CleanupStats, error) {
 		args.TxnsCount = txnsCount
 	}
 
-	oracle, cleanup, err := getOracle(args, maxMemoryTokens)
+	oracle, cleanup, err := getOracle(args, maxMemoryTokens, args.MaxTransactionsToProcess)
 	defer cleanup()
 	if err != nil {
 		return stats, err
@@ -231,6 +237,9 @@ func CleanAndPrune(args CleanAndPruneArgs) (CleanupStats, error) {
 	txnsStashName := args.Txns.Name + ".stash"
 	txnsStash := db.C(txnsStashName)
 
+	if oracle.Count() > int(float64(args.MaxTransactionsToProcess)*0.9) {
+		stats.ShouldRetry = true
+	}
 	if err := cleanupStash(oracle, txnsStash, &stats); err != nil { // XXX
 		return stats, err
 	}
@@ -245,12 +254,12 @@ func CleanAndPrune(args CleanAndPruneArgs) (CleanupStats, error) {
 	return stats, nil
 }
 
-func getOracle(args CleanAndPruneArgs, maxMemoryTxns int) (Oracle, func(), error) {
+func getOracle(args CleanAndPruneArgs, maxMemoryTxns int, maxTxns uint64) (Oracle, func(), error) {
 	// If we don't have very many transactions, just use the in-memory version
 	if args.TxnsCount < maxMemoryTxns {
-		return NewMemOracle(args.Txns, args.MaxTime)
+		return NewMemOracle(args.Txns, args.MaxTime, maxTxns)
 	}
-	return NewDBOracle(args.Txns, args.MaxTime)
+	return NewDBOracle(args.Txns, args.MaxTime, maxTxns)
 }
 
 // getPruneLastTxnsCount will return how many documents were in 'txns' the
@@ -585,7 +594,9 @@ func (r *bulkRemover) Flush() error {
 	case nil, mgo.ErrNotFound:
 		// It's OK for txns to no longer exist. Another process
 		// may have concurrently pruned them.
-		r.removed += result.Matched
+		if result != nil {
+			r.removed += result.Matched
+		}
 		r.newChunk()
 		return nil
 	default:
