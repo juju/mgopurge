@@ -18,7 +18,7 @@ import (
 // OracleSuite will be run against all oracle implementations.
 type OracleSuite struct {
 	TxnSuite
-	OracleFunc func(*mgo.Collection, time.Time, uint64) (jujutxn.Oracle, func(), error)
+	OracleFunc func(*mgo.Collection, time.Time, int) (jujutxn.Oracle, func(), error)
 }
 
 func (s *OracleSuite) txnToToken(c *gc.C, id bson.ObjectId) string {
@@ -169,7 +169,7 @@ func (s *OracleSuite) TestDoesntSeeNewTransactions(c *gc.C) {
 	checkTxnIds(c, []bson.ObjectId{txnId1}, all)
 }
 
-func (s *OracleSuite) countFoundTxns(c *gc.C, maxTxns uint64) int {
+func (s *OracleSuite) countFoundTxns(c *gc.C, maxTxns int) int {
 	oracle, cleanup, err := s.OracleFunc(s.txns, time.Time{}, maxTxns)
 	defer cleanup()
 	c.Assert(oracle, gc.NotNil)
@@ -187,7 +187,7 @@ func (s *OracleSuite) TestLimitsTxns(c *gc.C) {
 			Insert: bson.M{},
 		})
 	}
-	// We should only find 10 of the 100 txns.
+	// We should only find 10 of the 50 txns.
 	c.Check(s.countFoundTxns(c, 10), gc.Equals, 10)
 	// using a limit of '0' means all txns
 	c.Check(s.countFoundTxns(c, 0), gc.Equals, 50)
@@ -226,7 +226,7 @@ func (s *OracleSuite) TestNoThresholdSeesAllTransactions(c *gc.C) {
 	checkTxnIds(c, []bson.ObjectId{txnId1, txnId2, txnId3}, all)
 }
 
-func dbOracleFunc(c *mgo.Collection, thresholdTime time.Time, maxTxns uint64) (jujutxn.Oracle, func(), error) {
+func dbOracleFunc(c *mgo.Collection, thresholdTime time.Time, maxTxns int) (jujutxn.Oracle, func(), error) {
 	return jujutxn.NewDBOracle(c, thresholdTime, maxTxns)
 }
 
@@ -258,7 +258,7 @@ type DBCompatOracleSuite struct {
 	OracleSuite
 }
 
-func dbNoOutOracleFunc(c *mgo.Collection, thresholdTime time.Time, maxTxns uint64) (jujutxn.Oracle, func(), error) {
+func dbNoOutOracleFunc(c *mgo.Collection, thresholdTime time.Time, maxTxns int) (jujutxn.Oracle, func(), error) {
 	return jujutxn.NewDBOracleNoOut(c, thresholdTime, maxTxns)
 }
 
@@ -268,7 +268,7 @@ var _ = gc.Suite(&DBCompatOracleSuite{
 	},
 })
 
-func memOracleFunc(c *mgo.Collection, thresholdTime time.Time, maxTxns uint64) (jujutxn.Oracle, func(), error) {
+func memOracleFunc(c *mgo.Collection, thresholdTime time.Time, maxTxns int) (jujutxn.Oracle, func(), error) {
 	return jujutxn.NewMemOracle(c, thresholdTime, maxTxns)
 }
 

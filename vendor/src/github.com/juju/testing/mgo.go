@@ -25,12 +25,12 @@ import (
 	"testing"
 	"time"
 
+	"github.com/juju/clock"
 	"github.com/juju/errors"
 	"github.com/juju/loggo"
 	"github.com/juju/retry"
 	jc "github.com/juju/testing/checkers"
 	"github.com/juju/utils"
-	"github.com/juju/utils/clock"
 	"github.com/juju/version"
 	gc "gopkg.in/check.v1"
 	"gopkg.in/mgo.v2"
@@ -64,12 +64,6 @@ const (
 
 	// The default password to use when connecting to the mongo database.
 	DefaultMongoPassword = "conn-from-name-secret"
-
-	// defaultMongoStorageEngine is the default storage engine to use
-	// in Mongo 3.2 onwards for tests. We default to mmapv1 (vs. the
-	// mongo default of wiredTiger) for the best performance in tests,
-	// but make it configurable.
-	defaultMongoStorageEngine = "mmapv1"
 )
 
 // Certs holds the certificates and keys required to make a secure
@@ -236,7 +230,6 @@ func (inst *MgoInstance) run() error {
 		"--nssize", "1",
 		"--noprealloc",
 		"--smallfiles",
-		"--nohttpinterface",
 		"--oplogSize", "10",
 		"--ipv6",
 		"--setParameter", "enableTestCommands=1",
@@ -267,11 +260,10 @@ func (inst *MgoInstance) run() error {
 		mgoargs = append(mgoargs, "--nojournal")
 	}
 	if version.Compare(storageEngineMongoVersion) >= 0 {
-		storageEngine := os.Getenv("JUJU_MONGO_STORAGE_ENGINE")
-		if storageEngine == "" {
-			storageEngine = defaultMongoStorageEngine
+		storageEngine := mongoStorageEngine()
+		if storageEngine != "" {
+			mgoargs = append(mgoargs, "--storageEngine", storageEngine)
 		}
-		mgoargs = append(mgoargs, "--storageEngine", storageEngine)
 	}
 
 	if inst.Params != nil {
@@ -339,12 +331,32 @@ func (inst *MgoInstance) run() error {
 	return nil
 }
 
+func mongoStorageEngine() string {
+	storageEngine := os.Getenv("JUJU_MONGO_STORAGE_ENGINE")
+	if storageEngine != "" {
+		return storageEngine
+	}
+	switch runtime.GOARCH {
+	case "386", "amd64":
+		// On x86(_64), mmapv1 should always be available. If not
+		// overridden via the environment variable above, we use
+		// mmapv1 by default for the best performance in tests.
+		return "mmapv1"
+	}
+	return "" // use the default
+}
+
 // mongodCache looks up mongod path and version and caches the result.
 type mongodCache struct {
 	sync.Mutex
 	path    string
 	version version.Number
 	done    bool
+}
+
+func MongodVersion() (version.Number, error) {
+	_, v, err := installedMongod.Get()
+	return v, err
 }
 
 func (cache *mongodCache) Get() (string, version.Number, error) {
@@ -651,6 +663,11 @@ func clearCollections(db *mgo.Database) error {
 		if strings.HasPrefix(name, "system.") {
 			continue
 		}
+		if name == "oplog.rs" && db.Name == "local" {
+			// 3.4 prevents you from deleting your local replicaset information
+			// while part of a replica. Arguably it was never safe to do.
+			continue
+		}
 		collection := db.C(name)
 		clearFunc := clearNormalCollection
 		capped, err := isCapped(collection)
@@ -731,7 +748,7 @@ func (inst *MgoInstance) Reset() error {
 	logger.Infof("reset successfully reset admin password")
 	for _, name := range dbnames {
 		switch name {
-		case "local", "config":
+		case "local", "config", "admin":
 			// don't delete these
 			continue
 		}

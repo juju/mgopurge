@@ -7,6 +7,7 @@ import (
 	"errors"
 	"time"
 
+	"github.com/juju/clock/testclock"
 	"github.com/juju/testing"
 	gc "gopkg.in/check.v1"
 	"gopkg.in/mgo.v2"
@@ -316,7 +317,7 @@ func (s *txnSuite) TestRunFailureAlwaysUnexpectedMessage(c *gc.C) {
 
 func (s *txnSuite) TestRunTransactionObserver(c *gc.C) {
 	var calls []jujutxn.ObservedTransaction
-	clock := testing.NewClock(time.Now())
+	clock := testclock.NewClock(time.Now())
 	runner := jujutxn.NewRunner(jujutxn.RunnerParams{
 		RunTransactionObserver: func(txn jujutxn.ObservedTransaction) {
 			calls = append(calls, txn)
@@ -359,7 +360,7 @@ type fakeRunner struct {
 	jujutxn.TxnRunner
 	errors    []error
 	durations []time.Duration
-	clock     *testing.Clock
+	clock     *testclock.Clock
 }
 
 // Since a new transaction runner is created each time the code
