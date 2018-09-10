@@ -22,7 +22,7 @@ import (
 
 const txnsC = "txns"
 const txnsStashC = txnsC + ".stash"
-const defaultMaxTxnsToProcess = 1*1000*100
+const defaultMaxTxnsToProcess = 1 * 1000 * 100
 
 // TODO (jam): 2017-07-07 Change the stages to take a settings parameter
 // and move this into a local variable instead of a global variable.
@@ -68,6 +68,7 @@ var allStages = []stage{
 				txns:         txns,
 				longTxnSize:  1000,
 				txnBatchSize: txnBatchSize,
+				txnsStash:    db.C(txnsStashC),
 			}
 			return trimmer.Trim(collections)
 		},
@@ -83,8 +84,8 @@ var allStages = []stage{
 		func(db *mgo.Database, txns *mgo.Collection) error {
 			for {
 				stats, err := jujutxn.CleanAndPrune(jujutxn.CleanAndPruneArgs{
-					Txns:    txns,
-					MaxTime: time.Now().Add(-time.Hour),
+					Txns:                     txns,
+					MaxTime:                  time.Now().Add(-time.Hour),
 					MaxTransactionsToProcess: maxTxnsToProcess,
 				})
 				logger.Infof("clean and prune cleaned %d docs in %d collections\n"+

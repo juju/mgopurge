@@ -7,6 +7,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/juju/errors"
 	"gopkg.in/mgo.v2"
 	"gopkg.in/mgo.v2/bson"
 	"gopkg.in/mgo.v2/txn"
@@ -77,10 +78,12 @@ const maxTxnRemoveCount = 10000
 // LongTxnTrimmer handles processing transaction queues that have grown unmanageable
 // to be handled by the normal Resume logic.
 type LongTxnTrimmer struct {
-	txns  *mgo.Collection
-	timer *simpleTimer
+	txns      *mgo.Collection
+	txnsStash *mgo.Collection
+	timer     *simpleTimer
 
-	docCache map[docKey]*txnDoc
+	docCache    map[docKey]*txnDoc
+	docsInStash map[docKey]struct{}
 
 	txnsToProcess []bson.ObjectId
 
@@ -162,6 +165,74 @@ func (ltt *LongTxnTrimmer) removeTransactions(txnsToRemove []bson.ObjectId) erro
 func (ltt *LongTxnTrimmer) findDocsToProcess(collNames []string) error {
 	tokenCount := 0
 	seenTxnIds := make(map[bson.ObjectId]struct{})
+	// Special case the txns.stash collection, because it stores docs differently than the final collections.
+
+	handleOneDoc := func(key docKey, doc *txnDoc, collName string) {
+		ltt.docCache[key] = doc
+		doc.queue = make([]parsedToken, 0, len(doc.TxnQueue))
+		for _, token := range doc.TxnQueue {
+			txnId, valid := tokenToId(token)
+			if !valid {
+				// Shouldn't happen, at a minimum PurgeMissing should have removed it
+				logger.Warningf("%q document %q has invalid token: %v",
+					collName, doc.Id, token)
+				continue
+			}
+			doc.queue = append(doc.queue, parsedToken{
+				token: token.(string), // wouldn't be valid if it wasn't a string
+				txnId: txnId,
+			})
+			if _, ok := seenTxnIds[txnId]; ok {
+				continue
+			}
+			seenTxnIds[txnId] = struct{}{}
+			ltt.txnsToProcess = append(ltt.txnsToProcess, txnId)
+		}
+		tokenCount += len(doc.queue)
+		// Now we've converted everything to queue, we can drop the other data
+		logger.Infof("%q document %v has %d tokens",
+			collName, doc.Id, len(doc.queue))
+		doc.TxnQueue = nil
+	}
+	if ltt.txnsStash != nil {
+		if docs, err := findDocsWithLongQueues(ltt.txnsStash, ltt.longTxnSize); err != nil {
+			return err
+		} else {
+			for i := range docs {
+				doc := &docs[i]
+				// txns.stash documents actually are indexed by a docKey already
+				// so this comes back as a bson.M
+				m, ok := doc.Id.(bson.M)
+				if !ok {
+					logger.Warningf("unknown ID in %q: %#v", ltt.txnsStash.Name, doc.Id)
+					continue
+				}
+				coll, ok := m["c"]
+				if !ok {
+					logger.Warningf("ID in %q is missing 'c': %#v", ltt.txnsStash.Name, doc.Id)
+					continue
+				}
+				collStr, ok := coll.(string)
+				if !ok {
+					logger.Warningf("ID in %q has a bad 'c': %#v", ltt.txnsStash.Name, doc.Id)
+					continue
+				}
+				id, ok := m["id"]
+				if !ok {
+					logger.Warningf("ID in %q is missing 'id': %#v", ltt.txnsStash.Name, doc.Id)
+				}
+				key := docKey{
+					Id: id,
+					C:  collStr,
+				}
+				// We track all the docs in txns.stash as though they are the target doc in the database.
+				// Note: (jam 2018-09-06) this might be wrong for docs that are
+				// at particular stages of being removed/or inserted?
+				handleOneDoc(key, doc, ltt.txnsStash.Name)
+				ltt.docsInStash[key] = struct{}{}
+			}
+		}
+	}
 	for _, collName := range collNames {
 		coll := ltt.txns.Database.C(collName)
 		docs, err := findDocsWithLongQueues(coll, ltt.longTxnSize)
@@ -174,31 +245,7 @@ func (ltt *LongTxnTrimmer) findDocsToProcess(collNames []string) error {
 				Id: doc.Id,
 				C:  coll.Name,
 			}
-			ltt.docCache[key] = doc
-			doc.queue = make([]parsedToken, 0, len(doc.TxnQueue))
-			for _, token := range doc.TxnQueue {
-				txnId, valid := tokenToId(token)
-				if !valid {
-					// Shouldn't happen, at a minimum PurgeMissing should have removed it
-					logger.Warningf("%q document %q has invalid token: %v",
-						collName, doc.Id, token)
-					continue
-				}
-				doc.queue = append(doc.queue, parsedToken{
-					token: token.(string), // wouldn't be valid if it wasn't a string
-					txnId: txnId,
-				})
-				if _, ok := seenTxnIds[txnId]; ok {
-					continue
-				}
-				seenTxnIds[txnId] = struct{}{}
-				ltt.txnsToProcess = append(ltt.txnsToProcess, txnId)
-			}
-			tokenCount += len(doc.queue)
-			// Now we've converted everything to queue, we can drop the other data
-			logger.Infof("%q document %v has %d tokens",
-				coll.Name, doc.Id, len(doc.queue))
-			doc.TxnQueue = nil
+			handleOneDoc(key, doc, collName)
 		}
 	}
 	logger.Infof("found %d transactions and %d tokens that might be trimmed", len(ltt.txnsToProcess), tokenCount)
@@ -209,14 +256,15 @@ type txnBatchTrimmer struct {
 	txnIds        []bson.ObjectId
 	docCache      map[docKey]*txnDoc
 	docsToCleanup map[docKey]*txnDoc
+	docsInStash   map[docKey]struct{}
 	txns          map[bson.ObjectId]*rawTransaction
 	txnsToRemove  []bson.ObjectId
 
 	txnsSkippedCount int
 
 	txnRemover   func([]bson.ObjectId) error
-	tokenRemover func(docKey, []interface{}) error
-	tokenSetter  func(docKey, []string, int) error
+	tokenRemover func(docKey, []interface{}, bool) error
+	tokenSetter  func(docKey, []string, bool, int) error
 }
 
 // checkTransactionsFindDocs ensures that all of the transactions listed are of
@@ -276,6 +324,11 @@ func (tb *txnBatchTrimmer) processDoc(key docKey, doc *txnDoc) error {
 	tokensToSet := make([]string, 0, len(doc.queue))
 	remainingQueue := make([]parsedToken, 0, len(doc.queue))
 	txns := tb.txns
+	_, inStash := tb.docsInStash[key]
+	stashStr := ""
+	if inStash {
+		stashStr = " (in stash)"
+	}
 	for _, tokenInfo := range doc.queue {
 		if _, ok := txns[tokenInfo.txnId]; ok {
 			// we ignore nonce, as we will pull all
@@ -303,12 +356,12 @@ func (tb *txnBatchTrimmer) processDoc(key docKey, doc *txnDoc) error {
 		// note that $set isn't safe if doing concurrent accesses, but
 		// we don't allow that here. Controllers must be stopped, and
 		// only one goroutine modifies a doc at a time.
-		if err := tb.tokenSetter(key, tokensToSet, len(tokensToPull)); err != nil {
-			return err
+		if err := tb.tokenSetter(key, tokensToSet, inStash, len(tokensToPull)); err != nil {
+			return errors.Annotatef(err, "unable to process doc %v%s", key, stashStr)
 		}
 	} else {
-		if err := tb.tokenRemover(key, tokensToPull); err != nil {
-			return err
+		if err := tb.tokenRemover(key, tokensToPull, inStash); err != nil {
+			return errors.Annotatef(err, "unable to process doc %v%s", key, stashStr)
 		}
 	}
 	doc.queue = remainingQueue
@@ -345,7 +398,7 @@ func (tb *txnBatchTrimmer) processDocs() error {
 			break
 		}
 	}
-	return err
+	return errors.Trace(err)
 }
 
 func (tb *txnBatchTrimmer) Process() error {
@@ -361,12 +414,20 @@ func (tb *txnBatchTrimmer) Process() error {
 }
 
 // setTxnQueue rewrites the entire txn-queue field to be exactly 'tokens'
-func (ltt *LongTxnTrimmer) setTxnQueue(key docKey, tokens []string, pulledCount int) error {
+func (ltt *LongTxnTrimmer) setTxnQueue(key docKey, tokens []string, inStash bool, pulledCount int) error {
 	tStart := time.Now()
 	session := ltt.txns.Database.Session.Copy()
 	defer session.Close()
-	coll := ltt.txns.Database.C(key.C).With(session)
-	err := coll.UpdateId(key.Id, bson.M{"$set": bson.M{"txn-queue": tokens}})
+	var coll *mgo.Collection
+	finalKey := key.Id
+	if inStash {
+		coll = ltt.txnsStash
+		finalKey = key
+	} else {
+		coll = ltt.txns.Database.C(key.C)
+	}
+	coll = coll.With(session)
+	err := coll.UpdateId(finalKey, bson.M{"$set": bson.M{"txn-queue": tokens}})
 	if err != nil {
 		return err
 	}
@@ -378,13 +439,21 @@ func (ltt *LongTxnTrimmer) setTxnQueue(key docKey, tokens []string, pulledCount 
 	return nil
 }
 
-func (ltt *LongTxnTrimmer) pullTokens(key docKey, tokens []interface{}) error {
+func (ltt *LongTxnTrimmer) pullTokens(key docKey, tokens []interface{}, inStash bool) error {
 	// default mgopurge includes TRACE logging
 	// logger.Tracef("removing %d tokens from %q %v", len(tokens), key.C, key.Id)
 	remaining := tokens
 	session := ltt.txns.Database.Session.Copy()
 	defer session.Close()
-	coll := ltt.txns.Database.C(key.C).With(session)
+	var coll *mgo.Collection
+	finalKey := key.Id
+	if inStash {
+		coll = ltt.txnsStash
+		finalKey = key
+	} else {
+		coll = ltt.txns.Database.C(key.C)
+	}
+	coll = coll.With(session)
 	for len(remaining) > 0 {
 		batch := remaining
 		if len(batch) > ltt.txnBatchSize {
@@ -392,7 +461,7 @@ func (ltt *LongTxnTrimmer) pullTokens(key docKey, tokens []interface{}) error {
 		}
 		tStart := time.Now()
 		remaining = remaining[len(batch):]
-		if err := pullTokens(coll, key.Id, batch); err != nil {
+		if err := pullTokens(coll, finalKey, batch); err != nil {
 			return err
 		}
 		ltt.mu.Lock()
@@ -422,6 +491,7 @@ func (ltt *LongTxnTrimmer) processQueue() error {
 			txnsToRemove:  make([]bson.ObjectId, 0, len(batch)),
 
 			docCache:     ltt.docCache,
+			docsInStash:  ltt.docsInStash,
 			txnRemover:   ltt.removeTransactions,
 			tokenRemover: ltt.pullTokens,
 			tokenSetter:  ltt.setTxnQueue,
@@ -437,6 +507,7 @@ func (ltt *LongTxnTrimmer) processQueue() error {
 func (ltt *LongTxnTrimmer) Trim(collNames []string) error {
 	tStart := time.Now()
 	ltt.docCache = make(map[docKey]*txnDoc)
+	ltt.docsInStash = make(map[docKey]struct{})
 	if err := ltt.findDocsToProcess(collNames); err != nil {
 		return err
 	}
@@ -455,11 +526,12 @@ func (ltt *LongTxnTrimmer) Trim(collNames []string) error {
 	return nil
 }
 
-func TrimLongTransactionQueues(txns *mgo.Collection, maxQueueLength int, collNames ...string) error {
+func TrimLongTransactionQueues(txns *mgo.Collection, maxQueueLength int, txnsStashName string, collNames ...string) error {
 	trimmer := &LongTxnTrimmer{
 		timer:        newSimpleTimer(15 * time.Second),
 		txns:         txns,
 		longTxnSize:  maxQueueLength,
+		txnsStash:    txns.Database.C(txnsStashName),
 		txnBatchSize: defaultTxnBatchSize,
 	}
 	return trimmer.Trim(collNames)
