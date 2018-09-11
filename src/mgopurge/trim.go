@@ -195,42 +195,42 @@ func (ltt *LongTxnTrimmer) findDocsToProcess(collNames []string) error {
 		doc.TxnQueue = nil
 	}
 	if ltt.txnsStash != nil {
-		if docs, err := findDocsWithLongQueues(ltt.txnsStash, ltt.longTxnSize); err != nil {
-			return err
-		} else {
-			for i := range docs {
-				doc := &docs[i]
-				// txns.stash documents actually are indexed by a docKey already
-				// so this comes back as a bson.M
-				m, ok := doc.Id.(bson.M)
-				if !ok {
-					logger.Warningf("unknown ID in %q: %#v", ltt.txnsStash.Name, doc.Id)
-					continue
-				}
-				coll, ok := m["c"]
-				if !ok {
-					logger.Warningf("ID in %q is missing 'c': %#v", ltt.txnsStash.Name, doc.Id)
-					continue
-				}
-				collStr, ok := coll.(string)
-				if !ok {
-					logger.Warningf("ID in %q has a bad 'c': %#v", ltt.txnsStash.Name, doc.Id)
-					continue
-				}
-				id, ok := m["id"]
-				if !ok {
-					logger.Warningf("ID in %q is missing 'id': %#v", ltt.txnsStash.Name, doc.Id)
-				}
-				key := docKey{
-					Id: id,
-					C:  collStr,
-				}
-				// We track all the docs in txns.stash as though they are the target doc in the database.
-				// Note: (jam 2018-09-06) this might be wrong for docs that are
-				// at particular stages of being removed/or inserted?
-				handleOneDoc(key, doc, ltt.txnsStash.Name)
-				ltt.docsInStash[key] = struct{}{}
+		docs, err := findDocsWithLongQueues(ltt.txnsStash, ltt.longTxnSize)
+		if err != nil {
+			return errors.Trace(err)
+		}
+		for i := range docs {
+			doc := &docs[i]
+			// txns.stash documents actually are indexed by a docKey already
+			// so this comes back as a bson.M
+			m, ok := doc.Id.(bson.M)
+			if !ok {
+				logger.Warningf("unknown ID in %q: %#v", ltt.txnsStash.Name, doc.Id)
+				continue
 			}
+			coll, ok := m["c"]
+			if !ok {
+				logger.Warningf("ID in %q is missing 'c': %#v", ltt.txnsStash.Name, doc.Id)
+				continue
+			}
+			collStr, ok := coll.(string)
+			if !ok {
+				logger.Warningf("ID in %q has a bad 'c': %#v", ltt.txnsStash.Name, doc.Id)
+				continue
+			}
+			id, ok := m["id"]
+			if !ok {
+				logger.Warningf("ID in %q is missing 'id': %#v", ltt.txnsStash.Name, doc.Id)
+			}
+			key := docKey{
+				Id: id,
+				C:  collStr,
+			}
+			// We track all the docs in txns.stash as though they are the target doc in the database.
+			// Note: (jam 2018-09-06) this might be wrong for docs that are
+			// at particular stages of being removed/or inserted?
+			handleOneDoc(key, doc, ltt.txnsStash.Name)
+			ltt.docsInStash[key] = struct{}{}
 		}
 	}
 	for _, collName := range collNames {
