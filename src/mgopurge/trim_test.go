@@ -256,10 +256,6 @@ func (s *TrimSuite) TestTrimMultiDocWithStash(c *gc.C) {
 	c.Check(result["foo"], gc.Equals, "bar")
 	c.Check(result["txn-queue"], gc.HasLen, 51)
 	err = stash.FindId(bson.D{{"c", s.coll.Name}, {"id", 1}}).One(&result)
-	// if err != nil {
-	//     c.Assert(errors.Cause(err), jc.Satisfies, errors.IsNotFound)
-	//     err = stash.FindId(bson.D{{"id": 1}, {"c", s.coll.Name}}).One(&result)
-	// }
 	c.Assert(err, jc.ErrorIsNil)
 	c.Check(result["txn-queue"], gc.HasLen, 50)
 	trimmer := &LongTxnTrimmer{
