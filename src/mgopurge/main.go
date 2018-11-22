@@ -22,7 +22,7 @@ import (
 
 const txnsC = "txns"
 const txnsStashC = txnsC + ".stash"
-const defaultMaxTxnsToProcess = 1 * 1000 * 100
+const defaultMaxTxnsToProcess = 1 * 1000 * 1000
 
 // TODO (jam): 2017-07-07 Change the stages to take a settings parameter
 // and move this into a local variable instead of a global variable.
