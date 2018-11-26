@@ -82,16 +82,37 @@ var allStages = []stage{
 		"prune",
 		"Prune finalised transactions",
 		func(db *mgo.Database, txns *mgo.Collection) error {
+			first := false
+			var totalStats jujutxn.CleanupStats
+			totalStart := time.Now()
 			for {
+				phaseStart := time.Now()
 				stats, err := jujutxn.CleanAndPrune(jujutxn.CleanAndPruneArgs{
 					Txns:                     txns,
 					MaxTime:                  time.Now().Add(-time.Hour),
 					MaxTransactionsToProcess: maxTxnsToProcess,
 				})
+				if first {
+					totalStats = stats
+					first = false
+				} else {
+					totalStats.DocsCleaned += stats.DocsCleaned
+					totalStats.CollectionsInspected += stats.CollectionsInspected
+					totalStats.TransactionsRemoved += stats.TransactionsRemoved
+					totalStats.StashDocumentsRemoved += stats.StashDocumentsRemoved
+				}
 				logger.Infof("clean and prune cleaned %d docs in %d collections\n"+
-					"  removed %d transactions and %d stash documents",
+					"  removed %d transactions and %d stash documents in %s",
 					stats.DocsCleaned, stats.CollectionsInspected,
-					stats.TransactionsRemoved, stats.StashDocumentsRemoved)
+					stats.TransactionsRemoved, stats.StashDocumentsRemoved,
+					time.Since(phaseStart).Round(time.Millisecond))
+				if !first {
+					logger.Infof("total clean and prune cleaned %d docs in %d collections\n"+
+						"  removed %d transactions and %d stash documents in %s",
+						totalStats.DocsCleaned, totalStats.CollectionsInspected,
+						totalStats.TransactionsRemoved, totalStats.StashDocumentsRemoved,
+						time.Since(totalStart).Round(time.Millisecond))
+				}
 				if err != nil {
 					return err
 				}
