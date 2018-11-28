@@ -9,19 +9,24 @@ description: |
 
 
 grade: devel
-confinement: classic
+confinement: devmode
 
 apps:
     mgopurge:
-        command: bin/mgopurge
+        command: mgopurge
 
 parts:
-    mgopurge:
-        source: .
+    gb:
         plugin: go
-        go-importpath: github.com/juju/mgopurge
-        override-build:
-            rm -rf bin/* pkg/* src/mgopurge/version.go
-            gb generate
-            gb build -f
-
+        source: https://github.com/constabulary/gb.git
+        go-importpath: github.com/constabulary/gb
+        go-packages:
+            - github.com/constabulary/gb
+    mgopurge:
+        after: [gb]
+        source: .
+        plugin: make
+        artifacts:
+            - bin/mgopurge
+        override-build: |
+            make snap-release

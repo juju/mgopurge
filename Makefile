@@ -5,6 +5,10 @@ build: generate
 release: clean check-clean generate
 	gb build -f
 
+snap-release: clean generate
+	gb build -f
+	cp bin/mgopurge ${SNAPCRAFT_PART_INSTALL}
+
 clean:
 	rm -rf bin/* pkg/* src/mgopurge/version.go
 
