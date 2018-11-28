@@ -21,5 +21,7 @@ parts:
         plugin: go
         go-importpath: github.com/juju/mgopurge
         override-build:
-            make release
+            rm -rf bin/* pkg/* src/mgopurge/version.go
+            gb generate
+            gb build -f
 
