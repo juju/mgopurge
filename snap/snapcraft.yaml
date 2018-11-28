@@ -1,0 +1,25 @@
+name: mgopurge
+version: git
+summary: Cleanup Mongo databases managed by mgo/txn
+description: |
+    This runs several steps to handle known issues with mgo/txn. Specifically things like:
+        * transaction ids referenced by documents but the transaction itself is missing.
+        * transaction queues growing too long
+        * being able to cleanup transactions that have been applied from the txns collection.
+
+
+grade: devel
+confinement: classic
+
+apps:
+    mgopurge:
+        command: bin/mgopurge
+
+parts:
+    mgopurge:
+        source: .
+        plugin: go
+        go-importpath: github.com/juju/mgopurge
+        override-build:
+            make release
+
