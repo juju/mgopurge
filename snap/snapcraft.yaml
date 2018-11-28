@@ -6,24 +6,22 @@ description: |
         * transaction ids referenced by documents but the transaction itself is missing.
         * transaction queues growing too long
         * being able to cleanup transactions that have been applied from the txns collection.
+# license is not currently supported in 'snapcraft stable'
+#license: AGPL v3
+type: app
 
 
 grade: devel
-confinement: devmode
+confinement: strict
 
 apps:
     mgopurge:
         command: mgopurge
+        plugs:
+            - network
 
 parts:
-    gb:
-        plugin: go
-        source: https://github.com/constabulary/gb.git
-        go-importpath: github.com/constabulary/gb
-        go-packages:
-            - github.com/constabulary/gb
     mgopurge:
-        after: [gb]
         source: .
         plugin: make
         artifacts:
