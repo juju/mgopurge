@@ -269,12 +269,9 @@ func (p *IncrementalPruner) txnRemoveThread(txns *mgo.Collection, ch chan []bson
 			continue
 		}
 		// Is Bulk better than doing it directly?
-		bulk := txns.Bulk()
-		bulk.Unordered()
-		bulk.RemoveAll(bson.M{"_id": bson.M{"$in": batch}})
-		_, err := bulk.Run()
+		results, err := txns.RemoveAll(bson.M{"_id": bson.M{"$in": batch}})
 		if err == nil {
-			resultCh <- removeResult{count: len(batch)}
+			resultCh <- removeResult{count: results.Removed}
 		} else {
 			err = errors.Trace(err)
 			// TODO(jam): 2018-11-29 Bare channel send, support a shutdown of some sort
