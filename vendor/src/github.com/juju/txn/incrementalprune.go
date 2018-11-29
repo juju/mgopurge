@@ -4,13 +4,11 @@
 package txn
 
 import (
-	// "errors"
-	// "fmt"
-	// "strings"
 	"time"
 
 	"github.com/juju/errors"
 	"github.com/juju/lru"
+	"github.com/kr/pretty"
 	"gopkg.in/mgo.v2"
 	"gopkg.in/mgo.v2/bson"
 )
@@ -105,7 +103,11 @@ func (p *IncrementalPruner) lookupDocs(keys docKeySet, txnsStash *mgo.Collection
 		// For all the other documents, now we need to check txns.stash
 		foundMissingKeys := make(map[stashDocKey]struct{}, len(missingKeys))
 		p.stats.StashQueries++
-		query := txnsStash.Find(bson.M{"_id": bson.M{"$in": missingKeys}})
+		missingSlice := make([]stashDocKey, 0, len(missingKeys))
+		for key := range missingKeys {
+			missingSlice = append(missingSlice, key)
+		}
+		query := txnsStash.Find(bson.M{"_id": bson.M{"$in": missingSlice}})
 		query.Select(bson.M{"_id": 1, "txn-queue": 1})
 		query.Batch(queryDocBatchSize)
 		iter := query.Iter()
@@ -166,11 +168,22 @@ func (p *IncrementalPruner) pruneNextBatch(iter *mgo.Iter, txnsColl, txnsStash *
 		for _, docKey := range txn.Ops {
 			doc, ok := docMap[docKey]
 			if !ok {
-				logger.Warningf("transaction %q referenced document %v but it could not be found",
-					txn.Id.Hex(), docKey)
-				// This is usually a sign of corruption, but for the purposes of pruning, we'll just treat it as a
-				// transaction that cannot be cleaned up.
-				txnCanBeRemoved = false
+				if docKey.Collection == "metrics" {
+					// XXX: This is a special case. Metrics are *known* to violate the transaction guarantees
+					// by removing documents directly from the collection, without using a transaction. Even
+					// though they are *created* with transactions... bad metrics, bad dog
+					logger.Tracef("ignoring missing metrics doc: %v", docKey)
+				} else if docKey.Collection == "cloudimagemetadata" {
+					// There is an upgrade step in 2.3.4 that bulk deletes all cloudimagemetadata that have particular
+					// attributes, ignoring transactions...
+					logger.Tracef("ignoring missing cloudimagemetadat doc: %v", docKey)
+				} else {
+					logger.Warningf("transaction %q referenced document %v but it could not be found",
+						txn.Id.Hex(), docKey)
+					// This is usually a sign of corruption, but for the purposes of pruning, we'll just treat it as a
+					// transaction that cannot be cleaned up.
+					txnCanBeRemoved = false
+				}
 			}
 			tokensToPull := make([]string, 0)
 			newQueue := make([]string, 0)
@@ -273,7 +286,7 @@ func (p *IncrementalPruner) Prune(args CleanAndPruneArgs) (PrunerStats, error) {
 	// Maybe we can just remove anything that
 	logger.Infof("pruning removed %d txns and cleaned %d docs in %s.",
 		p.stats.TxnsRemoved, p.stats.DocQueuesCleaned, time.Since(tStart).Round(time.Millisecond))
-
+	logger.Debugf("prune stats: %# v", pretty.Formatter(p.stats))
 	return p.stats, nil
 }
 
