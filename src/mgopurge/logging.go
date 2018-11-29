@@ -13,10 +13,14 @@ import (
 
 var logger = loggo.GetLogger("mgopurge")
 
+const defaultLogConfig = "<root>=DEBUG"
+
+var loggingConfig = defaultLogConfig
+
 func setupLogging() error {
 	writer := loggo.NewSimpleWriter(os.Stderr, logFormatter)
 	loggo.ReplaceDefaultWriter(writer)
-	return loggo.ConfigureLoggers("<root>=TRACE")
+	return loggo.ConfigureLoggers(loggingConfig)
 }
 
 func logFormatter(entry loggo.Entry) string {
