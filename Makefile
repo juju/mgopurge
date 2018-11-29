@@ -5,6 +5,11 @@ build: generate
 release: clean check-clean generate
 	gb build -f
 
+snap-release: clean generate
+	# snap modifies the source tree to remove the snap directory, so we can't run 'make check-clean'
+	gb build -f
+	cp bin/mgopurge ${SNAPCRAFT_PART_INSTALL}
+
 clean:
 	rm -rf bin/* pkg/* src/mgopurge/version.go
 

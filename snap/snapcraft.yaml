@@ -1,0 +1,30 @@
+name: mgopurge
+version: git
+summary: Cleanup Mongo databases managed by mgo/txn
+description: |
+    This runs several steps to handle known issues with mgo/txn. Specifically things like:
+        * transaction ids referenced by documents but the transaction itself is missing.
+        * transaction queues growing too long
+        * being able to cleanup transactions that have been applied from the txns collection.
+# license is not currently supported in 'snapcraft stable'
+#license: AGPL v3
+type: app
+
+
+grade: stable
+confinement: strict
+
+apps:
+    mgopurge:
+        command: mgopurge
+        plugs:
+            - network
+
+parts:
+    mgopurge:
+        source: .
+        plugin: make
+        artifacts:
+            - bin/mgopurge
+        override-build: |
+            make snap-release
