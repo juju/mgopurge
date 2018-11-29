@@ -254,6 +254,8 @@ func commandLine() commandLineArgs {
 		"user for connecting to MonogDB (use \"\" to for no authentication)")
 	flags.StringVar(&a.password, "password", "",
 		"password for connecting to MonogDB")
+	flags.StringVar(&loggingConfig, "logging-config", defaultLogConfig,
+		"set the log levels of various modules")
 	flags.IntVar(&txnBatchSize, "txn-batch-size", defaultTxnBatchSize,
 		"how many transactions to prune at once, higher requires more memory but completes faster")
 	flags.IntVar(&maxTxnsToProcess, "max-txns", defaultMaxTxnsToProcess,
