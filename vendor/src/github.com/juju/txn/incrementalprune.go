@@ -21,24 +21,28 @@ const pruneDocCacheSize = 10000
 // and then moves on to newer transactions. It only thinks about 1k txns at a time, because that is the batch size that
 // can be deleted. Instead, it caches documents that it has seen.
 type IncrementalPruner struct {
-	docCache *lru.LRU
-	stats    PrunerStats
+	docCache     *lru.LRU
+	missingCache *lru.LRU
+	stats        PrunerStats
 }
 
 // PrunerStats collects statistics about how the prune progressed
 type PrunerStats struct {
-	DocCacheHits      uint64
-	DocCacheMisses    uint64
-	CollectionQueries uint64
-	DocReads          uint64
-	DocStillMissing   uint64
-	StashQueries      uint64
-	StashReads        uint64
-	DocQueuesCleaned  uint64
-	DocTokensCleaned  uint64
-	DocsAlreadyClean  uint64
-	TxnsRemoved       uint64
-	TxnsNotRemoved    uint64
+	DocCacheHits       int
+	DocCacheMisses     int
+	DocMissingCacheHit int
+	DocsMissing        int
+	CollectionQueries  int
+	DocReads           int
+	DocStillMissing    int
+	StashQueries       int
+	StashReads         int
+	DocQueuesCleaned   int
+	DocTokensCleaned   int
+	DocsAlreadyClean   int
+	TxnsRemoved        int
+	TxnsToRemove       int
+	TxnsNotRemoved     int
 }
 
 // lookupDocs searches the cache and then looks in the database for the txn-queue of all the referenced document keys.
@@ -84,7 +88,7 @@ func (p *IncrementalPruner) lookupDocs(keys docKeySet, txnsStash *mgo.Collection
 			p.stats.DocReads++
 			delete(missing, doc.Id)
 		}
-		p.stats.DocStillMissing += uint64(len(missing))
+		p.stats.DocStillMissing += len(missing)
 		for id, _ := range missing {
 			stashKey := stashDocKey{Collection: collection, Id: id}
 			missingKeys[stashKey] = struct{}{}
@@ -100,6 +104,9 @@ func (p *IncrementalPruner) lookupDocs(keys docKeySet, txnsStash *mgo.Collection
 	// referenced. However, the act of adding or remove a document should be cleaning up the txn queue anyway,
 	// which means it is safe to delete the document
 	if len(missingKeys) > 0 {
+		// TODO(jam): 2018-11-29, we know that the metrics collection is frequently cleaned by bulk removal, rather
+		// than  by removing with a txn.Op. Which means all those docs get looked up in stash even though they aren't
+		// there. Is there something better we could do?
 		// For all the other documents, now we need to check txns.stash
 		foundMissingKeys := make(map[stashDocKey]struct{}, len(missingKeys))
 		p.stats.StashQueries++
@@ -147,6 +154,11 @@ func (p *IncrementalPruner) pruneNextBatch(iter *mgo.Iter, txnsColl, txnsStash *
 			// TODO: Make sure we don't need a copy here, especially because of Ops being a slice
 			txns = append(txns, txn)
 			for _, key := range txn.Ops {
+				if _, ok := p.missingCache.Get(key); ok {
+					// known to be missing, don't bother
+					p.stats.DocMissingCacheHit++
+					continue
+				}
 				docsToCheck[key] = struct{}{}
 			}
 			txnsBeingCleaned[txn.Id] = struct{}{}
@@ -168,15 +180,18 @@ func (p *IncrementalPruner) pruneNextBatch(iter *mgo.Iter, txnsColl, txnsStash *
 		for _, docKey := range txn.Ops {
 			doc, ok := docMap[docKey]
 			if !ok {
+				p.stats.DocsMissing++
 				if docKey.Collection == "metrics" {
 					// XXX: This is a special case. Metrics are *known* to violate the transaction guarantees
 					// by removing documents directly from the collection, without using a transaction. Even
 					// though they are *created* with transactions... bad metrics, bad dog
 					logger.Tracef("ignoring missing metrics doc: %v", docKey)
+					p.missingCache.Add(docKey, nil)
 				} else if docKey.Collection == "cloudimagemetadata" {
 					// There is an upgrade step in 2.3.4 that bulk deletes all cloudimagemetadata that have particular
 					// attributes, ignoring transactions...
 					logger.Tracef("ignoring missing cloudimagemetadat doc: %v", docKey)
+					p.missingCache.Add(docKey, nil)
 				} else {
 					logger.Warningf("transaction %q referenced document %v but it could not be found",
 						txn.Id.Hex(), docKey)
@@ -196,7 +211,7 @@ func (p *IncrementalPruner) pruneNextBatch(iter *mgo.Iter, txnsColl, txnsStash *
 				}
 			}
 			if len(tokensToPull) > 0 {
-				p.stats.DocTokensCleaned += uint64(len(tokensToPull))
+				p.stats.DocTokensCleaned += len(tokensToPull)
 				p.stats.DocQueuesCleaned++
 				coll := db.C(docKey.Collection)
 				pull := bson.M{"$pullAll": bson.M{"txn-queue": tokensToPull}}
@@ -235,10 +250,19 @@ func (p *IncrementalPruner) pruneNextBatch(iter *mgo.Iter, txnsColl, txnsStash *
 		}
 	}
 	if len(txnsToDelete) > 0 {
-		results, err := txnsColl.RemoveAll(bson.M{
+		// TODO(jam): 2018-11-29 Evaluate if txnsColl.Bulk().RemoveAll is any better than txnsColl.RemoveAll, we especially want
+		// to be using Unordered()
+		// The other option is lots of Bulk.Remove() calls.
+		bulk := txnsColl.Bulk()
+		bulk.Unordered()
+		bulk.RemoveAll(bson.M{
 			"_id": bson.M{"$in": txnsToDelete},
 		})
-		p.stats.TxnsRemoved += uint64(results.Removed)
+		results, err := bulk.Run()
+		// ideally we would use something, but results.Removed doesn't seem to be part of the Bulk api
+		// p.stats.TxnsRemoved += results.Modified
+		p.stats.TxnsRemoved += results.Modified
+		p.stats.TxnsToRemove += len(txnsToDelete)
 		if err != nil {
 			return done, errors.Trace(err)
 		}
@@ -263,6 +287,9 @@ func (p *IncrementalPruner) Prune(args CleanAndPruneArgs) (PrunerStats, error) {
 	query.Batch(pruneTxnBatchSize)
 	iter := query.Iter()
 	for {
+		// TODO(jam): 2018-11-29 Create 2 goroutines, so that we can be calling txns.Remove() while the other routine is0
+		// reading docs, and cleaning up txn-queues. Not sure if that makes load bad, or if we get a 2x speedup because
+		// we can use one connection for reading docs and txn-queues, and a different connection for txns.Remove()
 		done, err := p.pruneNextBatch(iter, txns, txnsStash)
 		if err != nil {
 			iterErr := iter.Close()
@@ -286,7 +313,7 @@ func (p *IncrementalPruner) Prune(args CleanAndPruneArgs) (PrunerStats, error) {
 	// Maybe we can just remove anything that
 	logger.Infof("pruning removed %d txns and cleaned %d docs in %s.",
 		p.stats.TxnsRemoved, p.stats.DocQueuesCleaned, time.Since(tStart).Round(time.Millisecond))
-	logger.Debugf("prune stats: %# v", pretty.Formatter(p.stats))
+	logger.Debugf("prune stats: %s", pretty.Sprint(p.stats))
 	return p.stats, nil
 }
 

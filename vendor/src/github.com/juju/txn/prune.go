@@ -253,7 +253,8 @@ func CleanAndPrune(args CleanAndPruneArgs) (CleanupStats, error) {
 	}
 
 	pruner := IncrementalPruner{
-		docCache: lru.New(pruneDocCacheSize),
+		docCache:     lru.New(pruneDocCacheSize),
+		missingCache: lru.New(1000),
 	}
 	pstats, err := pruner.Prune(args)
 	if err != nil {
