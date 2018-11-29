@@ -41,7 +41,6 @@ type PrunerStats struct {
 	DocTokensCleaned   int
 	DocsAlreadyClean   int
 	TxnsRemoved        int
-	TxnsToRemove       int
 	TxnsNotRemoved     int
 }
 
@@ -258,11 +257,10 @@ func (p *IncrementalPruner) pruneNextBatch(iter *mgo.Iter, txnsColl, txnsStash *
 		bulk.RemoveAll(bson.M{
 			"_id": bson.M{"$in": txnsToDelete},
 		})
-		results, err := bulk.Run()
+		_, err := bulk.Run()
 		// ideally we would use something, but results.Removed doesn't seem to be part of the Bulk api
 		// p.stats.TxnsRemoved += results.Modified
-		p.stats.TxnsRemoved += results.Modified
-		p.stats.TxnsToRemove += len(txnsToDelete)
+		p.stats.TxnsRemoved += len(txnsToDelete)
 		if err != nil {
 			return done, errors.Trace(err)
 		}
