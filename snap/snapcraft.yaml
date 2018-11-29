@@ -11,7 +11,7 @@ description: |
 type: app
 
 
-grade: devel
+grade: stable
 confinement: strict
 
 apps:
