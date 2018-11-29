@@ -4,11 +4,12 @@
 package txn
 
 import (
-	"errors"
 	"fmt"
 	"strings"
 	"time"
 
+	"github.com/juju/errors"
+	"github.com/juju/lru"
 	"gopkg.in/mgo.v2"
 	"gopkg.in/mgo.v2/bson"
 )
@@ -251,38 +252,17 @@ func CleanAndPrune(args CleanAndPruneArgs) (CleanupStats, error) {
 		return stats, err
 	}
 
-	db := args.Txns.Database
-
-	if args.TxnsCount <= 0 {
-		txnsCount, err := args.Txns.Count()
-		if err != nil {
-			return stats, err
-		}
-		args.TxnsCount = txnsCount
+	pruner := IncrementalPruner{
+		docCache: lru.New(pruneDocCacheSize),
 	}
-
-	oracle, cleanup, err := getOracle(args, maxMemoryTokens, args.MaxTransactionsToProcess)
-	defer cleanup()
+	pstats, err := pruner.Prune(args)
 	if err != nil {
-		return stats, err
+		return stats, errors.Trace(err)
 	}
-	txnsStashName := args.Txns.Name + ".stash"
-	txnsStash := db.C(txnsStashName)
-
-	if args.MaxTransactionsToProcess > 0 && oracle.Count() > int(float64(args.MaxTransactionsToProcess)*0.9) {
-		stats.ShouldRetry = true
-	}
-	if err := cleanupStash(oracle, txnsStash, &stats); err != nil { // XXX
-		return stats, err
-	}
-
-	if err := cleanupAllCollections(db, oracle, args.Txns.Name, &stats); err != nil {
-		return stats, err
-	}
-
-	if err := PruneTxns(oracle, args.Txns, &stats); err != nil {
-		return stats, err
-	}
+	stats.TransactionsRemoved = int(pstats.TxnsRemoved)
+	stats.DocsCleaned = int(pstats.DocQueuesCleaned)
+	stats.StashDocumentsRemoved = 0
+	stats.DocsInspected = int(pstats.DocCacheMisses + pstats.DocCacheHits)
 	return stats, nil
 }
 
