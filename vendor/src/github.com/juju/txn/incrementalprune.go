@@ -4,7 +4,6 @@
 package txn
 
 import (
-	"sync"
 	"time"
 
 	"github.com/juju/errors"
@@ -141,7 +140,7 @@ func (p *IncrementalPruner) lookupDocs(keys docKeySet, txnsStash *mgo.Collection
 	return docs, nil
 }
 
-func (p *IncrementalPruner) pruneNextBatch(iter *mgo.Iter, txnsStash *mgo.Collection, removeCh chan []bson.ObjectId) (bool, error) {
+func (p *IncrementalPruner) pruneNextBatch(iter *mgo.Iter, txnsColl, txnsStash *mgo.Collection) (bool, error) {
 	done := false
 	// First, read all the txns to find the document identities we might care about
 	txns := make([]txnDoc, 0, pruneTxnBatchSize)
@@ -249,38 +248,20 @@ func (p *IncrementalPruner) pruneNextBatch(iter *mgo.Iter, txnsStash *mgo.Collec
 			p.stats.TxnsNotRemoved++
 		}
 	}
-	// TODO(jam): 2018-11-29 Bare channel send, support a shutdown of some sort
-	removeCh <- txnsToDelete
-	return done, nil
-}
-
-type removeResult struct {
-	count int
-	err   error
-}
-
-func (p *IncrementalPruner) txnRemoveThread(txns *mgo.Collection, ch chan []bson.ObjectId, resultCh chan removeResult) {
-	s := txns.Database.Session.Clone()
-	defer s.Close()
-	txns = txns.With(s)
-	for batch := range ch {
-		if len(batch) == 0 {
-			resultCh <- removeResult{count: 0}
-			continue
-		}
-		// Is Bulk better than doing it directly?
-		results, err := txns.RemoveAll(bson.M{"_id": bson.M{"$in": batch}})
-		if err == nil {
-			resultCh <- removeResult{count: results.Removed}
-		} else {
-			err = errors.Trace(err)
-			// TODO(jam): 2018-11-29 Bare channel send, support a shutdown of some sort
-			resultCh <- removeResult{
-				count: len(batch),
-				err:   err,
-			}
+	if len(txnsToDelete) > 0 {
+		// TODO(jam): 2018-11-29 Evaluate if txnsColl.Bulk().RemoveAll is any better than txnsColl.RemoveAll, we especially want
+		// to be using Unordered()
+		// The other option is lots of Bulk.Remove() calls.
+		// Bulk().Remove seems to be slower than RemoveAll
+		results, err := txnsColl.RemoveAll(bson.M{
+			"_id": bson.M{"$in": txnsToDelete},
+		})
+		p.stats.TxnsRemoved += results.Removed
+		if err != nil {
+			return done, errors.Trace(err)
 		}
 	}
+	return done, nil
 }
 
 func (p *IncrementalPruner) Prune(args CleanAndPruneArgs) (PrunerStats, error) {
@@ -295,39 +276,19 @@ func (p *IncrementalPruner) Prune(args CleanAndPruneArgs) (PrunerStats, error) {
 		"o.c": 1,
 		"o.d": 1,
 	})
-	query.Sort("_id")
 	timer := newSimpleTimer(15 * time.Second)
 	query.Batch(pruneTxnBatchSize)
-	removeChan := make(chan []bson.ObjectId, 0)
-	resultChan := make(chan removeResult, 0)
-	errs := []error{}
-	var wg sync.WaitGroup
-	go func() {
-		// collect the results
-		for {
-			res, ok := <-resultChan
-			if !ok {
-				break
-			}
-			p.stats.TxnsRemoved += res.count
-			if res.err != nil {
-				errs = append(errs, res.err)
-			}
-			wg.Done()
-		}
-	}()
-	go p.txnRemoveThread(txns, removeChan, resultChan)
 	iter := query.Iter()
 	for {
-		// There is one Wait for each pruneNextBatch iteration
-		wg.Add(1)
-		done, err := p.pruneNextBatch(iter, txnsStash, removeChan)
+		// TODO(jam): 2018-11-29 Create 2 goroutines, so that we can be calling txns.Remove() while the other routine is0
+		// reading docs, and cleaning up txn-queues. Not sure if that makes load bad, or if we get a 2x speedup because
+		// we can use one connection for reading docs and txn-queues, and a different connection for txns.Remove()
+		done, err := p.pruneNextBatch(iter, txns, txnsStash)
 		if err != nil {
 			iterErr := iter.Close()
 			if iterErr != nil {
 				logger.Warningf("ignoring iteration close error: %v", iterErr)
 			}
-			wg.Done()
 			return p.stats, errors.Trace(err)
 		}
 		if done {
@@ -340,12 +301,6 @@ func (p *IncrementalPruner) Prune(args CleanAndPruneArgs) (PrunerStats, error) {
 	}
 	if err := iter.Close(); err != nil {
 		return p.stats, errors.Trace(err)
-	}
-	wg.Wait()
-	close(removeChan)
-	close(resultChan)
-	if len(errs) != 0 {
-		return p.stats, errors.Trace(errs[0])
 	}
 	// TODO: Now we should iterate over txns.Stash and remove documents that aren't referenced by any transactions.
 	// Maybe we can just remove anything that
