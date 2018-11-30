@@ -44,9 +44,7 @@ type PrunerStats struct {
 	TxnsNotRemoved     int
 }
 
-// lookupDocs searches the cache and then looks in the database for the txn-queue of all the referenced document keys.
-func (p *IncrementalPruner) lookupDocs(keys docKeySet, txnsStash *mgo.Collection) (docMap, error) {
-	db := txnsStash.Database
+func (p *IncrementalPruner) lookupDocsInCache(keys docKeySet) (docMap, map[string][]interface{}) {
 	docs := make(docMap, len(docKeySet{}))
 	docsByCollection := make(map[string][]interface{}, 0)
 	for key, _ := range keys {
@@ -67,6 +65,14 @@ func (p *IncrementalPruner) lookupDocs(keys docKeySet, txnsStash *mgo.Collection
 			docsByCollection[key.Collection] = append(docsByCollection[key.Collection], key.DocId)
 		}
 	}
+	return docs, docsByCollection
+}
+
+func (p *IncrementalPruner) updateDocsFromCollections(
+	docs docMap,
+	docsByCollection map[string][]interface{},
+	db *mgo.Database,
+) (map[stashDocKey]struct{}, error) {
 	missingKeys := make(map[stashDocKey]struct{}, 0)
 	for collection, ids := range docsByCollection {
 		missing := make(map[interface{}]struct{}, len(ids))
@@ -97,50 +103,69 @@ func (p *IncrementalPruner) lookupDocs(keys docKeySet, txnsStash *mgo.Collection
 			return nil, errors.Trace(err)
 		}
 	}
+	return missingKeys, nil
+}
+
+func (p *IncrementalPruner) updateDocsFromStash(
+	docs docMap,
+	missingKeys map[stashDocKey]struct{},
+	txnsStash *mgo.Collection,
+) error {
 	// Note: there is some danger that new transactions will be adding and removing a document that we
 	// reference in an old transaction. If that is happening fast enough, it is possible that we won't be able to see
 	// the document in either place, and thus won't be able to verify that the old transaction is not actually
 	// referenced. However, the act of adding or remove a document should be cleaning up the txn queue anyway,
 	// which means it is safe to delete the document
+	// For all the other documents, now we need to check txns.stash
+	foundMissingKeys := make(map[stashDocKey]struct{}, len(missingKeys))
+	p.stats.StashQueries++
+	missingSlice := make([]stashDocKey, 0, len(missingKeys))
+	for key := range missingKeys {
+		missingSlice = append(missingSlice, key)
+	}
+	query := txnsStash.Find(bson.M{"_id": bson.M{"$in": missingSlice}})
+	query.Select(bson.M{"_id": 1, "txn-queue": 1})
+	query.Batch(queryDocBatchSize)
+	iter := query.Iter()
+	var doc stashEntry
+	for iter.Next(&doc) {
+		key := docKey{Collection: doc.Id.Collection, DocId: doc.Id.Id}
+		qDoc := docWithQueue{Id: doc.Id.Id, Queue: doc.Queue}
+		p.docCache.Add(key, qDoc)
+		docs[key] = qDoc
+		p.stats.StashReads++
+		foundMissingKeys[doc.Id] = struct{}{}
+	}
+	if err := iter.Close(); err != nil {
+		return errors.Trace(err)
+	}
+	for stashKey := range missingKeys {
+		if _, exists := foundMissingKeys[stashKey]; exists {
+			continue
+		}
+		// Note: we don't track docKeys that are still missing, they are found by the caller when they aren't in docMap
+	}
+	return nil
+}
+
+// lookupDocs searches the cache and then looks in the database for the txn-queue of all the referenced document keys.
+func (p *IncrementalPruner) lookupDocs(keys docKeySet, txnsStash *mgo.Collection) (docMap, error) {
+	docs, docsByCollection := p.lookupDocsInCache(keys)
+	missingKeys, err := p.updateDocsFromCollections(docs, docsByCollection, txnsStash.Database)
+	if err != nil {
+		return nil, errors.Trace(err)
+	}
 	if len(missingKeys) > 0 {
-		// TODO(jam): 2018-11-29, we know that the metrics collection is frequently cleaned by bulk removal, rather
-		// than  by removing with a txn.Op. Which means all those docs get looked up in stash even though they aren't
-		// there. Is there something better we could do?
-		// For all the other documents, now we need to check txns.stash
-		foundMissingKeys := make(map[stashDocKey]struct{}, len(missingKeys))
-		p.stats.StashQueries++
-		missingSlice := make([]stashDocKey, 0, len(missingKeys))
-		for key := range missingKeys {
-			missingSlice = append(missingSlice, key)
-		}
-		query := txnsStash.Find(bson.M{"_id": bson.M{"$in": missingSlice}})
-		query.Select(bson.M{"_id": 1, "txn-queue": 1})
-		query.Batch(queryDocBatchSize)
-		iter := query.Iter()
-		var doc stashEntry
-		for iter.Next(&doc) {
-			key := docKey{Collection: doc.Id.Collection, DocId: doc.Id.Id}
-			qDoc := docWithQueue{Id: doc.Id.Id, Queue: doc.Queue, foundInStash: true}
-			p.docCache.Add(key, qDoc)
-			docs[key] = qDoc
-			p.stats.StashReads++
-			foundMissingKeys[doc.Id] = struct{}{}
-		}
-		if err := iter.Close(); err != nil {
+		err := p.updateDocsFromStash(docs, missingKeys, txnsStash)
+		if err != nil {
 			return nil, errors.Trace(err)
-		}
-		for stashKey := range missingKeys {
-			if _, exists := foundMissingKeys[stashKey]; exists {
-				continue
-			}
-			// Note: we don't track docKeys that are still missing, they are found by the caller when they aren't in docMap
 		}
 	}
 
 	return docs, nil
 }
 
-func (p *IncrementalPruner) pruneNextBatch(iter *mgo.Iter, txnsColl, txnsStash *mgo.Collection) (bool, error) {
+func (p *IncrementalPruner) findTxnsAndDocsToLookup(iter *mgo.Iter) (bool, []txnDoc, map[bson.ObjectId]struct{}, docKeySet) {
 	done := false
 	// First, read all the txns to find the document identities we might care about
 	txns := make([]txnDoc, 0, pruneTxnBatchSize)
@@ -150,7 +175,6 @@ func (p *IncrementalPruner) pruneNextBatch(iter *mgo.Iter, txnsColl, txnsStash *
 	for count := 0; count < pruneTxnBatchSize; count++ {
 		var txn txnDoc
 		if iter.Next(&txn) {
-			// TODO: Make sure we don't need a copy here, especially because of Ops being a slice
 			txns = append(txns, txn)
 			for _, key := range txn.Ops {
 				if _, ok := p.missingCache.Get(key); ok {
@@ -165,19 +189,63 @@ func (p *IncrementalPruner) pruneNextBatch(iter *mgo.Iter, txnsColl, txnsStash *
 			done = true
 		}
 	}
-	db := txnsStash.Database
-	// Now that we have a bunch of documents we want to look at, load them from the collections
-	docMap, err := p.lookupDocs(docsToCheck, txnsStash)
-	if err != nil {
-		return done, errors.Trace(err)
+	return done, txns, txnsBeingCleaned, docsToCheck
+}
+
+func (p *IncrementalPruner) findTxnsToPull(doc docWithQueue, txnsBeingCleaned map[bson.ObjectId]struct{}) ([]string, []string, []bson.ObjectId) {
+	// We expect that *most* of the time, we won't pull any txns, because old txns will already have been removed
+	// Because of this, we actually do 2 passes over the data. The first time we are seeing if there is anything that
+	// might be pulled, and the second actually builds the new lists
+	// DocQueuesCleaned:253,438,
+	// DocsAlreadyClean:29,103,909
+	// So about 100x more likely to not have anything to do. No need to allocate the slices we won't use.
+	hasChanges := false
+	for _, txnId := range doc.Txns() {
+		if _, isCleaned := txnsBeingCleaned[txnId]; isCleaned {
+			hasChanges = true
+			break
+		}
 	}
+	if !hasChanges {
+		// No changes to make
+		return nil, nil, nil
+	}
+	tokensToPull := make([]string, 0)
+	newQueue := make([]string, 0, len(doc.Queue))
+	newTxns := make([]bson.ObjectId, 0, len(doc.Queue))
+	txnIds := doc.Txns()
+	for i := range doc.Queue {
+		token := doc.Queue[i]
+		txnId := txnIds[i]
+		if _, isCleaned := txnsBeingCleaned[txnId]; isCleaned {
+			tokensToPull = append(tokensToPull, token)
+		} else {
+			newQueue = append(newQueue, token)
+			newTxns = append(newTxns, txnId)
+		}
+	}
+	return tokensToPull, newQueue, newTxns
+}
+
+func (p *IncrementalPruner) cleanupDocs(
+	docsToCheck docKeySet,
+	foundDocs docMap,
+	txns []txnDoc,
+	txnsBeingCleaned map[bson.ObjectId]struct{},
+	db *mgo.Database,
+	txnsStash *mgo.Collection,
+) ([]bson.ObjectId, error) {
 	txnsToDelete := make([]bson.ObjectId, 0, pruneTxnBatchSize)
-	// TODO: Maybe we should use a Batch pull here, rather than a single query per doc?
-	// Potentially we should be sorting by collection
+	// TODO(jam): 2018-11-30 Currently this operates in txn order, iterating all the txns, finding docs to cleanup.
+	// We could, instead, iterate the txn order, then build up documents in each collection to clean, and then issue
+	// a single cleanup per collection.
+	// However, I'm not sure how that interacts with txns.stash, as we need to know which documents we failed to update.
+	// At least this code pulls all txns in the current batch in each pass. Though if you have the same docs over and
+	// over, you end up iterating the list to find there is nothing to pull multiple times.
 	for _, txn := range txns {
 		txnCanBeRemoved := true
 		for _, docKey := range txn.Ops {
-			doc, ok := docMap[docKey]
+			doc, ok := foundDocs[docKey]
 			if !ok {
 				p.stats.DocsMissing++
 				if docKey.Collection == "metrics" {
@@ -198,17 +266,9 @@ func (p *IncrementalPruner) pruneNextBatch(iter *mgo.Iter, txnsColl, txnsStash *
 					// transaction that cannot be cleaned up.
 					txnCanBeRemoved = false
 				}
+				continue
 			}
-			tokensToPull := make([]string, 0)
-			newQueue := make([]string, 0)
-			for _, token := range doc.Queue {
-				txnId := txnTokenToId(token)
-				if _, isCleaned := txnsBeingCleaned[txnId]; isCleaned {
-					tokensToPull = append(tokensToPull, token)
-				} else {
-					newQueue = append(newQueue, token)
-				}
-			}
+			tokensToPull, newQueue, newTxns := p.findTxnsToPull(doc, txnsBeingCleaned)
 			if len(tokensToPull) > 0 {
 				p.stats.DocTokensCleaned += len(tokensToPull)
 				p.stats.DocQueuesCleaned++
@@ -217,7 +277,7 @@ func (p *IncrementalPruner) pruneNextBatch(iter *mgo.Iter, txnsColl, txnsStash *
 				err := coll.UpdateId(docKey.DocId, pull)
 				if err != nil {
 					if err != mgo.ErrNotFound {
-						return done, errors.Trace(err)
+						return nil, errors.Trace(err)
 					}
 					// Look in txns.stash
 					err := txnsStash.UpdateId(stashDocKey{
@@ -231,11 +291,12 @@ func (p *IncrementalPruner) pruneNextBatch(iter *mgo.Iter, txnsColl, txnsStash *
 							txnCanBeRemoved = false
 							// We don't treat this as a fatal error, just a txn that cannot be cleaned up.
 						}
-						return done, errors.Trace(err)
+						return nil, errors.Trace(err)
 					}
 				}
 				// Update the known Queue of the document, since we cleaned it.
 				doc.Queue = newQueue
+				doc.txns = newTxns
 				p.docCache.Add(docKey, doc)
 			} else {
 				// already clean of transactions we are currently processing
@@ -247,6 +308,20 @@ func (p *IncrementalPruner) pruneNextBatch(iter *mgo.Iter, txnsColl, txnsStash *
 		} else {
 			p.stats.TxnsNotRemoved++
 		}
+	}
+	return txnsToDelete, nil
+}
+
+func (p *IncrementalPruner) pruneNextBatch(iter *mgo.Iter, txnsColl, txnsStash *mgo.Collection) (bool, error) {
+	done, txns, txnsBeingCleaned, docsToCheck := p.findTxnsAndDocsToLookup(iter)
+	// Now that we have a bunch of documents we want to look at, load them from the collections
+	foundDocs, err := p.lookupDocs(docsToCheck, txnsStash)
+	if err != nil {
+		return done, errors.Trace(err)
+	}
+	txnsToDelete, err := p.cleanupDocs(docsToCheck, foundDocs, txns, txnsBeingCleaned, txnsColl.Database, txnsStash)
+	if err != nil {
+		return done, errors.Trace(err)
 	}
 	if len(txnsToDelete) > 0 {
 		// TODO(jam): 2018-11-29 Evaluate if txnsColl.Bulk().RemoveAll is any better than txnsColl.RemoveAll, we especially want
@@ -314,9 +389,22 @@ func (p *IncrementalPruner) Prune(args CleanAndPruneArgs) (PrunerStats, error) {
 
 // docWithQueue is used to serialize a Mongo document that has a txn-queue
 type docWithQueue struct {
-	Id           interface{} `bson:"_id"`
-	Queue        []string    `bson:"txn-queue"`
-	foundInStash bool        `bson:"-"`
+	Id    interface{}     `bson:"_id"`
+	Queue []string        `bson:"txn-queue"`
+	txns  []bson.ObjectId `bson:"-"`
+}
+
+// Txns returns the Transaction ObjectIds associated with each token.
+// These are cached on the doc object, so that we don't have to convert repeatedly.
+func (dwq *docWithQueue) Txns() []bson.ObjectId {
+	if dwq.txns != nil {
+		return dwq.txns
+	}
+	dwq.txns = make([]bson.ObjectId, len(dwq.Queue))
+	for i := range dwq.Queue {
+		dwq.txns[i] = txnTokenToId(dwq.Queue[i])
+	}
+	return dwq.txns
 }
 
 // these are only the fields of txnDoc that we care about
