@@ -30,21 +30,36 @@ type IncrementalPruner struct {
 type PrunerStats struct {
 	DocCacheHits       int
 	DocCacheMisses     int
+	CacheLookupTime    time.Duration
+	DocLookupTime      time.Duration
+	DocCleanupTime     time.Duration
 	DocMissingCacheHit int
 	DocsMissing        int
 	CollectionQueries  int
+	DocReadTime        time.Duration
 	DocReads           int
 	DocStillMissing    int
 	StashQueries       int
 	StashReads         int
+	StashLookupTime    time.Duration
 	DocQueuesCleaned   int
 	DocTokensCleaned   int
 	DocsAlreadyClean   int
 	TxnsRemoved        int
+	TxnReadTime        time.Duration
 	TxnsNotRemoved     int
+	TxnRemoveTime      time.Duration
+}
+
+func checkTime(toAdd *time.Duration) func() {
+	tStart := time.Now()
+	return func() {
+		(*toAdd) += time.Since(tStart)
+	}
 }
 
 func (p *IncrementalPruner) lookupDocsInCache(keys docKeySet) (docMap, map[string][]interface{}) {
+	defer checkTime(&p.stats.CacheLookupTime)()
 	docs := make(docMap, len(docKeySet{}))
 	docsByCollection := make(map[string][]interface{}, 0)
 	for key, _ := range keys {
@@ -73,6 +88,7 @@ func (p *IncrementalPruner) updateDocsFromCollections(
 	docsByCollection map[string][]interface{},
 	db *mgo.Database,
 ) (map[stashDocKey]struct{}, error) {
+	defer checkTime(&p.stats.DocReadTime)()
 	missingKeys := make(map[stashDocKey]struct{}, 0)
 	for collection, ids := range docsByCollection {
 		missing := make(map[interface{}]struct{}, len(ids))
@@ -111,6 +127,7 @@ func (p *IncrementalPruner) updateDocsFromStash(
 	missingKeys map[stashDocKey]struct{},
 	txnsStash *mgo.Collection,
 ) error {
+	defer checkTime(&p.stats.StashLookupTime)()
 	// Note: there is some danger that new transactions will be adding and removing a document that we
 	// reference in an old transaction. If that is happening fast enough, it is possible that we won't be able to see
 	// the document in either place, and thus won't be able to verify that the old transaction is not actually
@@ -150,6 +167,7 @@ func (p *IncrementalPruner) updateDocsFromStash(
 
 // lookupDocs searches the cache and then looks in the database for the txn-queue of all the referenced document keys.
 func (p *IncrementalPruner) lookupDocs(keys docKeySet, txnsStash *mgo.Collection) (docMap, error) {
+	defer checkTime(&p.stats.DocLookupTime)()
 	docs, docsByCollection := p.lookupDocsInCache(keys)
 	missingKeys, err := p.updateDocsFromCollections(docs, docsByCollection, txnsStash.Database)
 	if err != nil {
@@ -166,6 +184,7 @@ func (p *IncrementalPruner) lookupDocs(keys docKeySet, txnsStash *mgo.Collection
 }
 
 func (p *IncrementalPruner) findTxnsAndDocsToLookup(iter *mgo.Iter) (bool, []txnDoc, map[bson.ObjectId]struct{}, docKeySet) {
+	defer checkTime(&p.stats.TxnReadTime)()
 	done := false
 	// First, read all the txns to find the document identities we might care about
 	txns := make([]txnDoc, 0, pruneTxnBatchSize)
@@ -235,6 +254,7 @@ func (p *IncrementalPruner) cleanupDocs(
 	db *mgo.Database,
 	txnsStash *mgo.Collection,
 ) ([]bson.ObjectId, error) {
+	defer checkTime(&p.stats.DocCleanupTime)()
 	txnsToDelete := make([]bson.ObjectId, 0, pruneTxnBatchSize)
 	// TODO(jam): 2018-11-30 Currently this operates in txn order, iterating all the txns, finding docs to cleanup.
 	// We could, instead, iterate the txn order, then build up documents in each collection to clean, and then issue
@@ -312,6 +332,22 @@ func (p *IncrementalPruner) cleanupDocs(
 	return txnsToDelete, nil
 }
 
+func (p *IncrementalPruner) removeTxns(txnsToDelete []bson.ObjectId, txns *mgo.Collection) error {
+	defer checkTime(&p.stats.TxnRemoveTime)()
+	// TODO(jam): 2018-11-29 Evaluate if txnsColl.Bulk().RemoveAll is any better than txnsColl.RemoveAll, we especially want
+	// to be using Unordered()
+	// The other option is lots of Bulk.Remove() calls.
+	// Bulk().Remove seems to be slower than RemoveAll
+	results, err := txns.RemoveAll(bson.M{
+		"_id": bson.M{"$in": txnsToDelete},
+	})
+	p.stats.TxnsRemoved += results.Removed
+	if err != nil {
+		return errors.Trace(err)
+	}
+	return nil
+}
+
 func (p *IncrementalPruner) pruneNextBatch(iter *mgo.Iter, txnsColl, txnsStash *mgo.Collection) (bool, error) {
 	done, txns, txnsBeingCleaned, docsToCheck := p.findTxnsAndDocsToLookup(iter)
 	// Now that we have a bunch of documents we want to look at, load them from the collections
@@ -324,17 +360,7 @@ func (p *IncrementalPruner) pruneNextBatch(iter *mgo.Iter, txnsColl, txnsStash *
 		return done, errors.Trace(err)
 	}
 	if len(txnsToDelete) > 0 {
-		// TODO(jam): 2018-11-29 Evaluate if txnsColl.Bulk().RemoveAll is any better than txnsColl.RemoveAll, we especially want
-		// to be using Unordered()
-		// The other option is lots of Bulk.Remove() calls.
-		// Bulk().Remove seems to be slower than RemoveAll
-		results, err := txnsColl.RemoveAll(bson.M{
-			"_id": bson.M{"$in": txnsToDelete},
-		})
-		p.stats.TxnsRemoved += results.Removed
-		if err != nil {
-			return done, errors.Trace(err)
-		}
+		p.removeTxns(txnsToDelete, txnsColl)
 	}
 	return done, nil
 }
@@ -372,8 +398,9 @@ func (p *IncrementalPruner) Prune(args CleanAndPruneArgs) (PrunerStats, error) {
 			break
 		}
 		if timer.isAfter() {
-			logger.Debugf("pruning has removed %d txns, handling %d docs (%d in cache)",
-				p.stats.TxnsRemoved, p.stats.DocCacheHits+p.stats.DocCacheMisses, p.stats.DocCacheHits)
+			logger.Debugf("pruning has removed %d txns, handling %d docs (%d in cache) %.3ftxn/s",
+				p.stats.TxnsRemoved, p.stats.DocCacheHits+p.stats.DocCacheMisses, p.stats.DocCacheHits,
+				(float64(p.stats.TxnsRemoved) / time.Since(tStart).Seconds()))
 		}
 	}
 	if err := iter.Close(); err != nil {
