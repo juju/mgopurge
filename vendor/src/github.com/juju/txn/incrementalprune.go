@@ -276,6 +276,8 @@ func (p *IncrementalPruner) Prune(args CleanAndPruneArgs) (PrunerStats, error) {
 		"o.c": 1,
 		"o.d": 1,
 	})
+	// Sorting by _id helps make sure that we are grouping the transactions close to each other.
+	query.Sort("_id")
 	timer := newSimpleTimer(15 * time.Second)
 	query.Batch(pruneTxnBatchSize)
 	iter := query.Iter()
