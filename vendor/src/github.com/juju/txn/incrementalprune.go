@@ -4,6 +4,7 @@
 package txn
 
 import (
+	"sync"
 	"time"
 
 	"github.com/juju/errors"
@@ -13,7 +14,7 @@ import (
 	"gopkg.in/mgo.v2/bson"
 )
 
-const pruneTxnBatchSize = 2000
+const pruneTxnBatchSize = 1000
 const queryDocBatchSize = 100
 const pruneDocCacheSize = 10000
 const missingKeyCacheSize = 2000
@@ -76,17 +77,46 @@ func (p *IncrementalPruner) Prune(args CleanAndPruneArgs) (PrunerStats, error) {
 	}
 	timer := newSimpleTimer(15 * time.Second)
 	query.Batch(pruneTxnBatchSize)
+	resultCh := make(chan removeResult)
+	stop := make(chan struct{}, 0)
+	errorResults := []error{}
+	var wg sync.WaitGroup
+	go func() {
+		for {
+			select {
+			case <-stop:
+				logger.Debugf("stopping")
+				return
+			case res := <-resultCh:
+				p.stats.TxnsRemoved += res.TxnRemoveCount
+				p.stats.TxnRemoveTime += res.TxnTime
+				logger.Debugf("final removed: %d", p.stats.TxnsRemoved)
+				if res.err != nil {
+					logger.Warningf("error while processing: %v", res.err)
+					errorResults = append(errorResults, errors.Trace(res.err))
+				}
+				wg.Done()
+			}
+		}
+	}()
+	i := 0
 	iter := query.Iter()
 	for {
 		// TODO(jam): 2018-11-29 Create 2 goroutines, so that we can be calling txns.Remove() while the other routine is0
 		// reading docs, and cleaning up txn-queues. Not sure if that makes load bad, or if we get a 2x speedup because
 		// we can use one connection for reading docs and txn-queues, and a different connection for txns.Remove()
-		done, err := p.pruneNextBatch(iter, txns, txnsStash)
+		wg.Add(1)
+		i++
+		logger.Debugf("pruning batch %d", i)
+		done, err := p.pruneNextBatch(iter, txns, txnsStash, resultCh)
 		if err != nil {
 			iterErr := iter.Close()
 			if iterErr != nil {
 				logger.Warningf("ignoring iteration close error: %v", iterErr)
 			}
+			// TODO: we don't close stop, or wait for things to die
+			wg.Done()
+			close(stop)
 			return p.stats, errors.Trace(err)
 		}
 		if done {
@@ -98,8 +128,15 @@ func (p *IncrementalPruner) Prune(args CleanAndPruneArgs) (PrunerStats, error) {
 				(float64(p.stats.TxnsRemoved) / time.Since(tStart).Seconds()))
 		}
 	}
+	// XXX: if we have errors, then wg.Done() probably doesn't get called, so we need to sort out the issues
+	logger.Debugf("waiting for prune batches")
+	wg.Wait()
+	close(stop)
 	if err := iter.Close(); err != nil {
 		return p.stats, errors.Trace(err)
+	}
+	if len(errorResults) != 0 {
+		return p.stats, errors.Trace(errorResults[0])
 	}
 	// TODO: Now we should iterate over txns.Stash and remove documents that aren't referenced by any transactions.
 	// Maybe we can just remove anything that
@@ -116,7 +153,13 @@ func checkTime(toAdd *time.Duration) func() {
 	}
 }
 
-func (p *IncrementalPruner) pruneNextBatch(iter *mgo.Iter, txnsColl, txnsStash *mgo.Collection) (bool, error) {
+type removeResult struct {
+	TxnRemoveCount int
+	TxnTime        time.Duration
+	err            error
+}
+
+func (p *IncrementalPruner) pruneNextBatch(iter *mgo.Iter, txnsColl, txnsStash *mgo.Collection, removeCh chan removeResult) (bool, error) {
 	done, txns, txnsBeingCleaned, docsToCheck := p.findTxnsAndDocsToLookup(iter)
 	// Now that we have a bunch of documents we want to look at, load them from the collections
 	foundDocs, err := p.lookupDocs(docsToCheck, txnsStash)
@@ -128,7 +171,10 @@ func (p *IncrementalPruner) pruneNextBatch(iter *mgo.Iter, txnsColl, txnsStash *
 		return done, errors.Trace(err)
 	}
 	if len(txnsToDelete) > 0 {
-		p.removeTxns(txnsToDelete, txnsColl)
+		p.removeTxns(txnsToDelete, txnsColl, removeCh)
+	} else {
+		// no error, nothing removed
+		removeCh <- removeResult{}
 	}
 	return done, nil
 }
@@ -479,19 +525,28 @@ func (p *IncrementalPruner) findTxnsToPull(doc docWithQueue, txnsBeingCleaned ma
 	return tokensToPull, newQueue, newTxns
 }
 
-func (p *IncrementalPruner) removeTxns(txnsToDelete []bson.ObjectId, txns *mgo.Collection) error {
-	defer checkTime(&p.stats.TxnRemoveTime)()
+func (p *IncrementalPruner) removeTxns(txnsToDelete []bson.ObjectId, txns *mgo.Collection, removeCh chan removeResult) error {
 	// TODO(jam): 2018-11-29 Evaluate if txnsColl.Bulk().RemoveAll is any better than txnsColl.RemoveAll, we especially want
 	// to be using Unordered()
 	// The other option is lots of Bulk.Remove() calls.
 	// Bulk().Remove seems to be slower than RemoveAll
-	results, err := txns.RemoveAll(bson.M{
-		"_id": bson.M{"$in": txnsToDelete},
-	})
-	p.stats.TxnsRemoved += results.Removed
-	if err != nil {
-		return errors.Trace(err)
-	}
+	go func() {
+		tStart := time.Now()
+		session := txns.Database.Session.Copy()
+		txns = txns.With(session)
+		defer session.Close()
+		logger.Debugf("removing %d txns", len(txnsToDelete))
+		results, err := txns.RemoveAll(bson.M{
+			"_id": bson.M{"$in": txnsToDelete},
+		})
+		// TODO: add a dying channel
+		logger.Debugf("removed %d txns result: %d", len(txnsToDelete), results.Removed)
+		removeCh <- removeResult{
+			TxnRemoveCount: results.Removed,
+			TxnTime:        time.Since(tStart),
+			err:            errors.Trace(err),
+		}
+	}()
 	return nil
 }
 
