@@ -13,7 +13,7 @@ import (
 	"gopkg.in/mgo.v2/bson"
 )
 
-const pruneTxnBatchSize = 1000
+const pruneTxnBatchSize = 2000
 const queryDocBatchSize = 100
 const pruneDocCacheSize = 10000
 const missingKeyCacheSize = 2000
