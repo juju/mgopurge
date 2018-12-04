@@ -44,10 +44,18 @@ func (lru *LRU) Add(key, value interface{}) {
 		entry.value = value
 	} else {
 		// We are adding an element, make sure there is room
+		var elem *list.Element
 		if lru.keys.Len() >= lru.maxSize {
-			lru.removeLast()
+			elem = lru.keys.Back()
+			if elem != nil {
+				delete(lru.values, elem.Value)
+				elem.Value = key
+				lru.keys.MoveToFront(elem)
+			}
 		}
-		elem := lru.keys.PushFront(key)
+		if elem == nil {
+			elem = lru.keys.PushFront(key)
+		}
 		entry = cacheEntry{
 			listElem: elem,
 			value:    value,
@@ -74,14 +82,4 @@ func (lru *LRU) Peek(key interface{}) (interface{}, bool) {
 		return entry.value, true
 	}
 	return nil, false
-}
-
-// removeLast removes the oldest entry from the queue
-func (lru *LRU) removeLast() {
-	last := lru.keys.Back()
-	if last != nil {
-		lru.keys.Remove(last)
-	}
-	// remember the "Value" in the list is actually a key
-	delete(lru.values, last.Value)
 }

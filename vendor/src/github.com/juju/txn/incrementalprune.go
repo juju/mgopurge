@@ -13,10 +13,10 @@ import (
 	"gopkg.in/mgo.v2/bson"
 )
 
-const pruneTxnBatchSize = 100
+const pruneTxnBatchSize = 1000
 const queryDocBatchSize = 100
-const pruneDocCacheSize = 20000
-const missingKeyCacheSize = 5000
+const pruneDocCacheSize = 10000
+const missingKeyCacheSize = 2000
 const strCacheSize = 10000
 
 // IncrementalPruner reads the transzaction table incrementally, seeing if it can remove the current set of transactions,
@@ -25,7 +25,7 @@ const strCacheSize = 10000
 type IncrementalPruner struct {
 	docCache     DocCache
 	missingCache MissingKeyCache
-	strCache     *lru.LRU
+	strCache     *lru.StringCache
 	stats        PrunerStats
 }
 
@@ -71,7 +71,7 @@ func (p *IncrementalPruner) Prune(args CleanAndPruneArgs) (PrunerStats, error) {
 	// Sorting by _id helps make sure that we are grouping the transactions close to each other.
 	query.Sort("_id")
 	timer := newSimpleTimer(15 * time.Second)
-	query.Batch(pruneTxnBatchSize / 10)
+	query.Batch(pruneTxnBatchSize)
 	iter := query.Iter()
 	for {
 		// TODO(jam): 2018-11-29 Create 2 goroutines, so that we can be calling txns.Remove() while the other routine is0
@@ -205,28 +205,15 @@ func (p *IncrementalPruner) lookupDocsInCache(keys docKeySet) (docMap, map[strin
 }
 
 func (p *IncrementalPruner) cacheString(s string) string {
-	cacheStr, exists := p.strCache.Get(s)
-	if exists {
-		p.stats.ObjCacheHit++
-		return cacheStr.(string)
-	} else {
-		p.stats.ObjCacheMiss++
-		p.strCache.Add(s, s)
-		return s
-	}
+	return p.strCache.Intern(s)
 }
 
 func (p *IncrementalPruner) cacheObj(obj interface{}) interface{} {
 	// technically this might not be a string, but 90% of the time it is.
-	cached, exists := p.strCache.Get(obj)
-	if exists {
-		p.stats.ObjCacheHit++
-		return cached
-	} else {
-		p.stats.ObjCacheMiss++
-		p.strCache.Add(obj, obj)
-		return obj
+	if s, ok := obj.(string); ok {
+		return p.strCache.Intern(s)
 	}
+	return obj
 }
 
 func (p *IncrementalPruner) cacheKey(key docKey) docKey {
@@ -239,15 +226,7 @@ func (p *IncrementalPruner) cacheKey(key docKey) docKey {
 }
 
 func (p *IncrementalPruner) cacheTxnId(objId bson.ObjectId) bson.ObjectId {
-	cacheId, exists := p.strCache.Get(objId)
-	if exists {
-		p.stats.ObjCacheHit++
-		return cacheId.(bson.ObjectId)
-	} else {
-		p.stats.ObjCacheMiss++
-		p.strCache.Add(objId, objId)
-		return objId
-	}
+	return bson.ObjectId(p.strCache.Intern(string(objId)))
 }
 
 func (p *IncrementalPruner) cacheDoc(collection string, docId interface{}, queue []string, docs docMap) docWithQueue {
