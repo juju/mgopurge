@@ -85,12 +85,10 @@ func (p *IncrementalPruner) Prune(args CleanAndPruneArgs) (PrunerStats, error) {
 		for {
 			select {
 			case <-stop:
-				logger.Debugf("stopping")
 				return
 			case res := <-resultCh:
 				p.stats.TxnsRemoved += res.TxnRemoveCount
 				p.stats.TxnRemoveTime += res.TxnTime
-				logger.Debugf("final removed: %d", p.stats.TxnsRemoved)
 				if res.err != nil {
 					logger.Warningf("error while processing: %v", res.err)
 					errorResults = append(errorResults, errors.Trace(res.err))
@@ -107,7 +105,6 @@ func (p *IncrementalPruner) Prune(args CleanAndPruneArgs) (PrunerStats, error) {
 		// we can use one connection for reading docs and txn-queues, and a different connection for txns.Remove()
 		wg.Add(1)
 		i++
-		logger.Debugf("pruning batch %d", i)
 		done, err := p.pruneNextBatch(iter, txns, txnsStash, resultCh)
 		if err != nil {
 			iterErr := iter.Close()
@@ -535,12 +532,11 @@ func (p *IncrementalPruner) removeTxns(txnsToDelete []bson.ObjectId, txns *mgo.C
 		session := txns.Database.Session.Copy()
 		txns = txns.With(session)
 		defer session.Close()
-		logger.Debugf("removing %d txns", len(txnsToDelete))
 		results, err := txns.RemoveAll(bson.M{
 			"_id": bson.M{"$in": txnsToDelete},
 		})
+		logger.Tracef("removing %d txns removed %d", len(txnsToDelete), results.Removed)
 		// TODO: add a dying channel
-		logger.Debugf("removed %d txns result: %d", len(txnsToDelete), results.Removed)
 		removeCh <- removeResult{
 			TxnRemoveCount: results.Removed,
 			TxnTime:        time.Since(tStart),
