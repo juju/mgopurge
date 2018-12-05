@@ -155,11 +155,11 @@ func (p *IncrementalPruner) pruneThread(
 	maxTime time.Time,
 	reverse bool,
 ) {
-	db := txns.Database
-	session := db.Session.Copy()
+	session := txns.Database.Session.Copy()
 	defer session.Close()
+	txns = txns.With(session)
 	txnsStashName := txns.Name + ".stash"
-	txnsStash := db.C(txnsStashName)
+	txnsStash := txns.Database.C(txnsStashName)
 	query := txns.Find(completedOldTransactionMatch(maxTime))
 	query.Select(bson.M{
 		"_id": 1,
@@ -596,10 +596,10 @@ func (p *IncrementalPruner) removeTxns(txnsToDelete []bson.ObjectId, txns *mgo.C
 	// The other option is lots of Bulk.Remove() calls.
 	// Bulk().Remove seems to be slower than RemoveAll
 	wg.Add(1)
+	session := txns.Database.Session.Copy()
+	txns = txns.With(session)
 	go func() {
 		tStart := time.Now()
-		session := txns.Database.Session.Copy()
-		txns = txns.With(session)
 		defer session.Close()
 		results, err := txns.RemoveAll(bson.M{
 			"_id": bson.M{"$in": txnsToDelete},
