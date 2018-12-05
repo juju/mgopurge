@@ -87,40 +87,11 @@ var allStages = []stage{
 			totalStart := time.Now()
 			for {
 				phaseStart := time.Now()
-				type Result struct {
-					stats jujutxn.CleanupStats
-					err   error
-				}
-				resCh := make(chan Result, 0)
-				go func() {
-					session := txns.Database.Session.Clone()
-					defer session.Close()
-					stats, err := jujutxn.CleanAndPrune(jujutxn.CleanAndPruneArgs{
-						Txns:                     txns.With(session),
-						MaxTime:                  time.Now().Add(-time.Hour),
-						MaxTransactionsToProcess: maxTxnsToProcess,
-					})
-					resCh <- Result{stats, err}
-				}()
-				// go func() {
-				// 	session := txns.Database.Session.Clone()
-				// 	defer session.Close()
-				// 	stats, err := jujutxn.CleanAndPrune(jujutxn.CleanAndPruneArgs{
-				// 		Txns:                     txns.With(session),
-				// 		MaxTime:                  time.Now().Add(-time.Hour),
-				// 		MaxTransactionsToProcess: maxTxnsToProcess,
-				// 		Direction:                -1,
-				// 	})
-				// 	resCh <- Result{stats, err}
-				// }()
-				res1 := <-resCh
-				// res2 := <-resCh
-				stats := res1.stats
-				// stats.DocsInspected += res2.stats.DocsInspected
-				// stats.StashDocumentsRemoved += res2.stats.StashDocumentsRemoved
-				// stats.DocsCleaned += res2.stats.DocsCleaned
-				// stats.TransactionsRemoved += res2.stats.TransactionsRemoved
-				// stats.CollectionsInspected += res2.stats.CollectionsInspected
+                                stats, err := jujutxn.CleanAndPrune(jujutxn.CleanAndPruneArgs{
+                                        Txns:                     txns,
+                                        MaxTime:                  time.Now().Add(-time.Hour),
+                                        MaxTransactionsToProcess: maxTxnsToProcess,
+                                })
 				logger.Infof("clean and prune cleaned %d docs in %d collections\n"+
 					"  removed %d transactions and %d stash documents in %s",
 					stats.DocsCleaned, stats.CollectionsInspected,
@@ -140,12 +111,9 @@ var allStages = []stage{
 						totalStats.TransactionsRemoved, totalStats.StashDocumentsRemoved,
 						time.Since(totalStart).Round(time.Millisecond))
 				}
-				if res1.err != nil {
-					return res1.err
+				if err != nil {
+					return err
 				}
-				// if res2.err != nil {
-				// 	return res2.err
-				// }
 				if stats.ShouldRetry {
 					logger.Infof("Not all transactions processed, running another clean step")
 				} else {

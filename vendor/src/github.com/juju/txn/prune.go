@@ -150,50 +150,17 @@ func maybePrune(db *mgo.Database, txnsName string, pruneOpts PruneOptions) error
 		// transactions repeatedly. However, as long as the queries prefer
 		// old transactions, the chances that those are stale is low.
 		batchStarted := time.Now()
-		type Results struct {
-			cs  CleanupStats
-			err error
-		}
-		resCh := make(chan Results, 0)
-		go func() {
-			session := txns.Database.Session.Copy()
-			defer session.Close()
-			localTxns := txns.With(session)
-			batchStats, err := CleanAndPrune(CleanAndPruneArgs{
-				Txns:                     localTxns,
-				TxnsCount:                txnsCount,
-				MaxTime:                  pruneOpts.MaxTime,
-				MaxTransactionsToProcess: pruneOpts.MaxBatchTransactions,
-			})
-			resCh <- Results{batchStats, err}
-		}()
-		go func() {
-			session := txns.Database.Session.Copy()
-			defer session.Close()
-			localTxns := txns.With(session)
-			batchStats, err := CleanAndPrune(CleanAndPruneArgs{
-				Txns:                     localTxns,
-				TxnsCount:                txnsCount,
-				MaxTime:                  pruneOpts.MaxTime,
-				MaxTransactionsToProcess: pruneOpts.MaxBatchTransactions,
-				Direction:                -1,
-			})
-			resCh <- Results{batchStats, err}
-		}()
-		var batchStats CleanupStats
-		res1 := <-resCh
-		res2 := <-resCh
-		batchStats = res1.cs
-		batchStats.DocsInspected += res2.cs.DocsInspected
-		batchStats.StashDocumentsRemoved += res2.cs.StashDocumentsRemoved
-		batchStats.DocsCleaned += res2.cs.DocsCleaned
-		batchStats.TransactionsRemoved += res2.cs.TransactionsRemoved
-		batchStats.CollectionsInspected += res2.cs.CollectionsInspected
-		if res1.err != nil {
-			return errors.Trace(res1.err)
-		}
-		if res2.err != nil {
-			return errors.Trace(res2.err)
+		session := txns.Database.Session.Copy()
+		defer session.Close()
+		localTxns := txns.With(session)
+		batchStats, err := CleanAndPrune(CleanAndPruneArgs{
+			Txns:                     localTxns,
+			TxnsCount:                txnsCount,
+			MaxTime:                  pruneOpts.MaxTime,
+			MaxTransactionsToProcess: pruneOpts.MaxBatchTransactions,
+		})
+		if err != nil {
+			return errors.Trace(err)
 		}
 		txnsCountAfter, err = txns.Count()
 		if err != nil {
@@ -249,8 +216,6 @@ type CleanAndPruneArgs struct {
 	// MaxTransactionsToProcess defines how many completed transactions that we will evaluate in this batch.
 	// A value of 0 indicates we should evaluate all completed transactions.
 	MaxTransactionsToProcess int
-
-	Direction int
 }
 
 func (args *CleanAndPruneArgs) validate() error {
@@ -297,7 +262,10 @@ func CleanAndPrune(args CleanAndPruneArgs) (CleanupStats, error) {
 		missingCache: MissingKeyCache{lru.New(missingKeyCacheSize)},
 		strCache:     lru.NewStringCache(strCacheSize),
 	}
-	pstats, err := pruner.Prune(args)
+	pstats, err := pruner.Prune(IncrementalPruneArgs{
+		Txns:    args.Txns,
+		MaxTime: args.MaxTime,
+	})
 	if err != nil {
 		return stats, errors.Trace(err)
 	}

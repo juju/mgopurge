@@ -5,6 +5,7 @@ package txn
 
 import (
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/juju/errors"
@@ -30,115 +31,153 @@ type IncrementalPruner struct {
 	stats        PrunerStats
 }
 
+// IncrementalPruneArgs specifies the parameters for running incremental cleanup steps..
+type IncrementalPruneArgs struct {
+	// Txns is the collection that holds all of the transactions that we
+	// might want to prune. We will also make use of Txns.Database to find
+	// all of the collections that might make use of transactions from that
+	// collection.
+	Txns *mgo.Collection
+
+	// MaxTime is a timestamp that provides a threshold of transactions
+	// that we will actually prune. Only transactions that were created
+	// before this threshold will be pruned.
+	MaxTime time.Time
+
+	// MultipleCleanups can be set to true to trigger multiple goroutines cleaning up different transactions.
+	MultipleCleanups bool
+}
+
 // PrunerStats collects statistics about how the prune progressed
 type PrunerStats struct {
-	DocCacheHits       int
-	DocCacheMisses     int
 	CacheLookupTime    time.Duration
 	DocLookupTime      time.Duration
 	DocCleanupTime     time.Duration
-	DocMissingCacheHit int
-	DocsMissing        int
-	CollectionQueries  int
 	DocReadTime        time.Duration
-	DocReads           int
-	DocStillMissing    int
-	StashQueries       int
-	StashReads         int
 	StashLookupTime    time.Duration
-	DocQueuesCleaned   int
-	DocTokensCleaned   int
-	DocsAlreadyClean   int
-	TxnsRemoved        int
 	TxnReadTime        time.Duration
-	TxnsNotRemoved     int
 	TxnRemoveTime      time.Duration
-	ObjCacheHit        int
-	ObjCacheMiss       int
+	DocCacheHits       int64
+	DocCacheMisses     int64
+	DocMissingCacheHit int64
+	DocsMissing        int64
+	CollectionQueries  int64
+	DocReads           int64
+	DocStillMissing    int64
+	StashQueries       int64
+	StashDocReads      int64
+	DocQueuesCleaned   int64
+	DocTokensCleaned   int64
+	DocsAlreadyClean   int64
+	TxnsRemoved        int64
+	TxnsNotRemoved     int64
 }
 
-func (p *IncrementalPruner) Prune(args CleanAndPruneArgs) (PrunerStats, error) {
+func (p *IncrementalPruner) startReportingThread(stop <-chan struct{}) {
 	tStart := time.Now()
-	txns := args.Txns
+	next := time.After(15 * time.Second)
+	go func() {
+		select {
+		case <-stop:
+			return
+		case <-next:
+			hits := atomic.LoadInt64(&p.stats.DocCacheHits)
+			totalDocs := hits + atomic.LoadInt64(&p.stats.DocCacheMisses)
+			cachePercent := 0.0
+			if totalDocs > 0 {
+				cachePercent = 100.0 * float64(hits) / float64(totalDocs)
+			}
+			txnRate := 0.0
+			since := time.Since(tStart).Seconds()
+			removed := atomic.LoadInt64(&p.stats.TxnsRemoved)
+			if since > 0 {
+				txnRate = float64(removed) / since
+			}
+			logger.Debugf("pruning has removed %d txns looking at %d docs (%.1f%% in cache)%.0ftxn/s",
+				removed, totalDocs, cachePercent, txnRate)
+			next = time.After(15 * time.Second)
+		}
+	}()
+}
+
+func (p *IncrementalPruner) pruneThread(
+	stop <-chan struct{},
+	errorCh chan error,
+	wg *sync.WaitGroup,
+	txns *mgo.Collection,
+	maxTime time.Time,
+	reverse bool,
+) {
 	db := txns.Database
-	txnsStashName := args.Txns.Name + ".stash"
+	session := db.Session.Copy()
+	defer session.Close()
+	txnsStashName := txns.Name + ".stash"
 	txnsStash := db.C(txnsStashName)
-	query := txns.Find(completedOldTransactionMatch(args.MaxTime))
+	query := txns.Find(completedOldTransactionMatch(maxTime))
 	query.Select(bson.M{
 		"_id": 1,
 		"o.c": 1,
 		"o.d": 1,
 	})
-	// Sorting by _id helps make sure that we are grouping the transactions close to each other.
-	if args.Direction >= 0 {
-		query.Sort("_id")
-	} else {
+	// Sorting by _id helps make sure that we are grouping the transactions close to each other for removals
+	if reverse {
 		query.Sort("-_id")
+	} else {
+		query.Sort("_id")
 	}
-	timer := newSimpleTimer(15 * time.Second)
 	query.Batch(pruneTxnBatchSize)
-	resultCh := make(chan removeResult)
-	stop := make(chan struct{}, 0)
-	errorResults := []error{}
-	var wg sync.WaitGroup
-	go func() {
-		for {
-			select {
-			case <-stop:
-				return
-			case res := <-resultCh:
-				p.stats.TxnsRemoved += res.TxnRemoveCount
-				p.stats.TxnRemoveTime += res.TxnTime
-				if res.err != nil {
-					logger.Warningf("error while processing: %v", res.err)
-					errorResults = append(errorResults, errors.Trace(res.err))
-				}
-				wg.Done()
-			}
-		}
-	}()
-	i := 0
 	iter := query.Iter()
-	for {
-		// TODO(jam): 2018-11-29 Create 2 goroutines, so that we can be calling txns.Remove() while the other routine is0
-		// reading docs, and cleaning up txn-queues. Not sure if that makes load bad, or if we get a 2x speedup because
-		// we can use one connection for reading docs and txn-queues, and a different connection for txns.Remove()
-		wg.Add(1)
-		i++
-		done, err := p.pruneNextBatch(iter, txns, txnsStash, resultCh)
+	done := false
+	for !done {
+		var err error
+		done, err = p.pruneNextBatch(iter, txns, txnsStash, errorCh, wg)
 		if err != nil {
+			done = true
 			iterErr := iter.Close()
 			if iterErr != nil {
 				logger.Warningf("ignoring iteration close error: %v", iterErr)
 			}
-			// TODO: we don't close stop, or wait for things to die
-			wg.Done()
-			close(stop)
-			return p.stats, errors.Trace(err)
-		}
-		if done {
+			errorCh <- errors.Trace(err)
 			break
 		}
-		if timer.isAfter() {
-			logger.Debugf("pruning has removed %d txns, handling %d docs (%d in cache) %.0ftxn/s",
-				p.stats.TxnsRemoved, p.stats.DocCacheHits+p.stats.DocCacheMisses, p.stats.DocCacheHits,
-				(float64(p.stats.TxnsRemoved) / time.Since(tStart).Seconds()))
+		select {
+		case <-stop:
+			done = true
+		default:
+			// do nothing
 		}
 	}
-	// XXX: if we have errors, then wg.Done() probably doesn't get called, so we need to sort out the issues
-	logger.Debugf("waiting for prune batches")
+	if err := iter.Close(); err != nil {
+		errorCh <- errors.Trace(err)
+	}
+	wg.Done()
+}
+
+func (p *IncrementalPruner) Prune(args IncrementalPruneArgs) (PrunerStats, error) {
+	tStart := time.Now()
+	stop := make(chan struct{}, 0)
+	p.startReportingThread(stop)
+	errorCh := make(chan error, 100)
+	var wg sync.WaitGroup
+
+	wg.Add(1)
+	go p.pruneThread(stop, errorCh, &wg, args.Txns, args.MaxTime, false)
+
 	wg.Wait()
 	close(stop)
-	if err := iter.Close(); err != nil {
-		return p.stats, errors.Trace(err)
-	}
-	if len(errorResults) != 0 {
-		return p.stats, errors.Trace(errorResults[0])
+	select {
+	case err := <-errorCh:
+		if err != nil {
+			return p.stats, errors.Trace(err)
+		}
+	default:
 	}
 	// TODO: Now we should iterate over txns.Stash and remove documents that aren't referenced by any transactions.
-	// Maybe we can just remove anything that
+	// Essentially, any document in txns.Stash that has 0 entries in its txn-queue.
 	logger.Infof("pruning removed %d txns and cleaned %d docs in %s.",
-		p.stats.TxnsRemoved, p.stats.DocQueuesCleaned, time.Since(tStart).Round(time.Millisecond))
+		atomic.LoadInt64(&p.stats.TxnsRemoved),
+		atomic.LoadInt64(&p.stats.DocQueuesCleaned),
+		time.Since(tStart).Round(time.Millisecond))
 	logger.Debugf("prune stats: %s", pretty.Sprint(p.stats))
 	return p.stats, nil
 }
@@ -146,7 +185,7 @@ func (p *IncrementalPruner) Prune(args CleanAndPruneArgs) (PrunerStats, error) {
 func checkTime(toAdd *time.Duration) func() {
 	tStart := time.Now()
 	return func() {
-		(*toAdd) += time.Since(tStart)
+		atomic.AddInt64((*int64)(toAdd), int64(time.Since(tStart)))
 	}
 }
 
@@ -156,7 +195,7 @@ type removeResult struct {
 	err            error
 }
 
-func (p *IncrementalPruner) pruneNextBatch(iter *mgo.Iter, txnsColl, txnsStash *mgo.Collection, removeCh chan removeResult) (bool, error) {
+func (p *IncrementalPruner) pruneNextBatch(iter *mgo.Iter, txnsColl, txnsStash *mgo.Collection, errorCh chan error, wg *sync.WaitGroup) (bool, error) {
 	done, txns, txnsBeingCleaned, docsToCheck := p.findTxnsAndDocsToLookup(iter)
 	// Now that we have a bunch of documents we want to look at, load them from the collections
 	foundDocs, err := p.lookupDocs(docsToCheck, txnsStash)
@@ -168,10 +207,7 @@ func (p *IncrementalPruner) pruneNextBatch(iter *mgo.Iter, txnsColl, txnsStash *
 		return done, errors.Trace(err)
 	}
 	if len(txnsToDelete) > 0 {
-		p.removeTxns(txnsToDelete, txnsColl, removeCh)
-	} else {
-		// no error, nothing removed
-		removeCh <- removeResult{}
+		p.removeTxns(txnsToDelete, txnsColl, errorCh, wg)
 	}
 	return done, nil
 }
@@ -213,7 +249,7 @@ func (p *IncrementalPruner) findTxnsAndDocsToLookup(iter *mgo.Iter) (bool, []txn
 			for _, key := range txn.Ops {
 				if p.missingCache.IsMissing(key) {
 					// known to be missing, don't bother
-					p.stats.DocMissingCacheHit++
+					atomic.AddInt64(&p.stats.DocMissingCacheHit, 1)
 					continue
 				}
 				docsToCheck[key] = struct{}{}
@@ -242,9 +278,9 @@ func (p *IncrementalPruner) lookupDocsInCache(keys docKeySet) (docMap, map[strin
 			// cleaned up. But since we only process completed transaction we can't miss a document that has the txn
 			// added to it.
 			docs[key] = cacheDoc
-			p.stats.DocCacheHits++
+			atomic.AddInt64(&p.stats.DocCacheHits, 1)
 		} else {
-			p.stats.DocCacheMisses++
+			atomic.AddInt64(&p.stats.DocCacheMisses, 1)
 			docsByCollection[key.Collection] = append(docsByCollection[key.Collection], key.DocId)
 		}
 	}
@@ -341,14 +377,14 @@ func (p *IncrementalPruner) updateDocsFromCollections(
 		query.Select(bson.M{"_id": 1, "txn-queue": 1})
 		query.Batch(queryDocBatchSize)
 		iter := query.Iter()
-		p.stats.CollectionQueries++
+		atomic.AddInt64(&p.stats.CollectionQueries, 1)
 		var doc docWithQueue
 		for iter.Next(&doc) {
 			doc = p.cacheDoc(collection, doc.Id, doc.Queue, docs)
-			p.stats.DocReads++
+			atomic.AddInt64(&p.stats.DocReads, 1)
 			delete(missing, doc.Id)
 		}
-		p.stats.DocStillMissing += len(missing)
+		atomic.AddInt64(&p.stats.DocStillMissing, int64(len(missing)))
 		for id, _ := range missing {
 			stashKey := stashDocKey{Collection: collection, Id: id}
 			missingKeys[stashKey] = struct{}{}
@@ -383,7 +419,7 @@ func (p *IncrementalPruner) updateDocsFromStash(
 	// referenced. However, the act of adding or remove a document should be cleaning up the txn queue anyway,
 	// which means it is safe to delete the document
 	// For all the other documents, now we need to check txns.stash
-	p.stats.StashQueries++
+	atomic.AddInt64(&p.stats.StashQueries, 1)
 	missingSlice := make([]stashDocKey, 0, len(missingKeys))
 	for key := range missingKeys {
 		missingSlice = append(missingSlice, key)
@@ -395,7 +431,7 @@ func (p *IncrementalPruner) updateDocsFromStash(
 	var doc stashEntry
 	for iter.Next(&doc) {
 		p.cacheDoc(doc.Id.Collection, doc.Id.Id, doc.Queue, docs)
-		p.stats.StashReads++
+		atomic.AddInt64(&p.stats.StashDocReads, 1)
 	}
 	if err := iter.Close(); err != nil {
 		return errors.Trace(err)
@@ -424,7 +460,7 @@ func (p *IncrementalPruner) cleanupDocs(
 		for _, docKey := range txn.Ops {
 			doc, ok := foundDocs[docKey]
 			if !ok {
-				p.stats.DocsMissing++
+				atomic.AddInt64(&p.stats.DocsMissing, 1)
 				p.missingCache.KnownMissing(docKey)
 				if docKey.Collection == "metrics" {
 					// XXX: This is a special case. Metrics are *known* to violate the transaction guarantees
@@ -446,8 +482,8 @@ func (p *IncrementalPruner) cleanupDocs(
 			}
 			tokensToPull, newQueue, newTxns := p.findTxnsToPull(doc, txnsBeingCleaned)
 			if len(tokensToPull) > 0 {
-				p.stats.DocTokensCleaned += len(tokensToPull)
-				p.stats.DocQueuesCleaned++
+				atomic.AddInt64(&p.stats.DocTokensCleaned, int64(len(tokensToPull)))
+				atomic.AddInt64(&p.stats.DocQueuesCleaned, 1)
 				coll := db.C(docKey.Collection)
 				pull := bson.M{"$pullAll": bson.M{"txn-queue": tokensToPull}}
 				err := coll.UpdateId(docKey.DocId, pull)
@@ -476,13 +512,13 @@ func (p *IncrementalPruner) cleanupDocs(
 				p.docCache.Add(docKey, doc)
 			} else {
 				// already clean of transactions we are currently processing
-				p.stats.DocsAlreadyClean++
+				atomic.AddInt64(&p.stats.DocsAlreadyClean, 1)
 			}
 		}
 		if txnCanBeRemoved {
 			txnsToDelete = append(txnsToDelete, txn.Id)
 		} else {
-			p.stats.TxnsNotRemoved++
+			atomic.AddInt64(&p.stats.TxnsNotRemoved, 1)
 		}
 	}
 	return txnsToDelete, nil
@@ -522,11 +558,12 @@ func (p *IncrementalPruner) findTxnsToPull(doc docWithQueue, txnsBeingCleaned ma
 	return tokensToPull, newQueue, newTxns
 }
 
-func (p *IncrementalPruner) removeTxns(txnsToDelete []bson.ObjectId, txns *mgo.Collection, removeCh chan removeResult) error {
+func (p *IncrementalPruner) removeTxns(txnsToDelete []bson.ObjectId, txns *mgo.Collection, errorCh chan error, wg *sync.WaitGroup) error {
 	// TODO(jam): 2018-11-29 Evaluate if txnsColl.Bulk().RemoveAll is any better than txnsColl.RemoveAll, we especially want
 	// to be using Unordered()
 	// The other option is lots of Bulk.Remove() calls.
 	// Bulk().Remove seems to be slower than RemoveAll
+	wg.Add(1)
 	go func() {
 		tStart := time.Now()
 		session := txns.Database.Session.Copy()
@@ -536,12 +573,13 @@ func (p *IncrementalPruner) removeTxns(txnsToDelete []bson.ObjectId, txns *mgo.C
 			"_id": bson.M{"$in": txnsToDelete},
 		})
 		logger.Tracef("removing %d txns removed %d", len(txnsToDelete), results.Removed)
-		// TODO: add a dying channel
-		removeCh <- removeResult{
-			TxnRemoveCount: results.Removed,
-			TxnTime:        time.Since(tStart),
-			err:            errors.Trace(err),
+		// TODO: add a stop channel
+		atomic.AddInt64(&p.stats.TxnsRemoved, int64(results.Removed))
+		atomic.AddInt64((*int64)(&p.stats.TxnRemoveTime), int64(time.Since(tStart)))
+		if err != nil {
+			errorCh <- errors.Trace(err)
 		}
+		wg.Done()
 	}()
 	return nil
 }
