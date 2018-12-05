@@ -122,25 +122,27 @@ func (p *IncrementalPruner) startReportingThread(stop <-chan struct{}) {
 	tStart := time.Now()
 	next := time.After(15 * time.Second)
 	go func() {
-		select {
-		case <-stop:
-			return
-		case <-next:
-			hits := atomic.LoadInt64(&p.stats.DocCacheHits)
-			totalDocs := hits + atomic.LoadInt64(&p.stats.DocCacheMisses)
-			cachePercent := 0.0
-			if totalDocs > 0 {
-				cachePercent = 100.0 * float64(hits) / float64(totalDocs)
+		for {
+			select {
+			case <-stop:
+				return
+			case <-next:
+				hits := atomic.LoadInt64(&p.stats.DocCacheHits)
+				totalDocs := hits + atomic.LoadInt64(&p.stats.DocCacheMisses)
+				cachePercent := 0.0
+				if totalDocs > 0 {
+					cachePercent = 100.0 * float64(hits) / float64(totalDocs)
+				}
+				txnRate := 0.0
+				since := time.Since(tStart).Seconds()
+				removed := atomic.LoadInt64(&p.stats.TxnsRemoved)
+				if since > 0 {
+					txnRate = float64(removed) / since
+				}
+				logger.Debugf("pruning has removed %d txns looking at %d docs (%.1f%% in cache) %.0ftxn/s",
+					removed, totalDocs, cachePercent, txnRate)
+				next = time.After(15 * time.Second)
 			}
-			txnRate := 0.0
-			since := time.Since(tStart).Seconds()
-			removed := atomic.LoadInt64(&p.stats.TxnsRemoved)
-			if since > 0 {
-				txnRate = float64(removed) / since
-			}
-			logger.Debugf("pruning has removed %d txns looking at %d docs (%.1f%% in cache)%.0ftxn/s",
-				removed, totalDocs, cachePercent, txnRate)
-			next = time.After(15 * time.Second)
 		}
 	}()
 }
