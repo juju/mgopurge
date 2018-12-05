@@ -6,6 +6,7 @@ package lru_test
 import (
 	"fmt"
 	"math/rand"
+	"sync"
 	"unsafe"
 
 	gc "gopkg.in/check.v1"
@@ -87,6 +88,60 @@ func (*StringsSuite) TestInternAbuse(c *gc.C) {
 	c.Check(cache.Len(), gc.Equals, size)
 }
 
+func (*StringsSuite) TestHitCount(c *gc.C) {
+	cache := lru.NewStringCache(5)
+	cache.Intern("a")
+	cache.Intern("b")
+	cache.Intern("c")
+	cache.Intern("d")
+	cache.Intern("d")
+	cache.Intern("d")
+	cache.Intern("d")
+	c.Check(cache.HitCounts(), gc.Equals, lru.HitCounts{Hit: 3, Miss: 4})
+	cache.Intern("e")
+	cache.Intern("f")
+	cache.Intern("a")
+	// we overflowed, so everything misses
+	c.Check(cache.HitCounts(), gc.Equals, lru.HitCounts{Hit: 3, Miss: 7})
+}
+
+func (*StringsSuite) TestInternMultithreaded(c *gc.C) {
+	const totalKeys = 100000
+	const totalUniqueKeys = 1000
+	const threads = 10
+	keys := make([]string, totalKeys)
+	for i := 0; i < totalKeys; i++ {
+		keys[i] = fmt.Sprint((i % totalUniqueKeys) + 1000000)
+	}
+	var size int = totalUniqueKeys * 0.75
+	c.Logf("using size: %d", size)
+	cache := lru.NewStringCache(size)
+	var wg sync.WaitGroup
+	var mu sync.Mutex
+	for i := 0; i < threads; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			localKeys := keys[:]
+			rand.Shuffle(c.N, func(i, j int) { localKeys[j], localKeys[i] = localKeys[i], localKeys[j] })
+			for _, k := range keys {
+				mu.Lock()
+				v := cache.Intern(k)
+				mu.Unlock()
+				if v != k {
+					c.Errorf("key %q mapped to %q", k, v)
+					return
+				}
+			}
+		}()
+	}
+	wg.Wait()
+	c.Check(cache.Len(), gc.Equals, size)
+	hitCount := cache.HitCounts()
+	c.Logf("hit count: %# v", hitCount)
+	c.Check(hitCount.Hit+hitCount.Miss, gc.Equals, int64(totalKeys*threads))
+}
+
 var _ = gc.Suite(&BenchmarkStrings{})
 
 type BenchmarkStrings struct{}
@@ -162,16 +217,15 @@ func (*BenchmarkStrings) BenchmarkInternRand2000000(c *gc.C) {
 func benchmarkIntern(c *gc.C, size int, randomize bool) {
 	strs := make([]string, c.N)
 	for i := 0; i < c.N; i++ {
+		// We want reasonably long strings
 		strs[i] = fmt.Sprint(i + 10000000)
 	}
 	if randomize {
 		rand.Shuffle(c.N, func(i, j int) { strs[j], strs[i] = strs[i], strs[j] })
 	}
 	cache := lru.NewStringCache(size)
-	// cache.Prealloc()
 	c.ResetTimer()
 	for i := 0; i < c.N; i++ {
-		// We want reasonably long strings
 		cache.Intern(strs[i])
 	}
 	expectLen := size

@@ -16,7 +16,7 @@ check-licence:
 		xargs -I {} echo FAIL: licence missed: {}
 
 check-go:
-	$(eval GOFMT := $(strip $(shell gofmt -l .| sed -e "s/^/ /g")))
+	$(eval GOFMT := $(strip $(shell gofmt -l -s .| sed -e "s/^/ /g")))
 	@(if [ "x$(GOFMT)" != "x" ]; then \
 		echo "go fmt is sad: $(GOFMT)"; \
 		exit 1; \

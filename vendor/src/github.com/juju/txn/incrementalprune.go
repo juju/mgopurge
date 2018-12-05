@@ -56,6 +56,7 @@ type PrunerStats struct {
 	DocCleanupTime     time.Duration
 	DocReadTime        time.Duration
 	StashLookupTime    time.Duration
+	StashRemoveTime    time.Duration
 	TxnReadTime        time.Duration
 	TxnRemoveTime      time.Duration
 	DocCacheHits       int64
@@ -67,11 +68,54 @@ type PrunerStats struct {
 	DocStillMissing    int64
 	StashQueries       int64
 	StashDocReads      int64
+	StashDocsRemoved   int64
 	DocQueuesCleaned   int64
 	DocTokensCleaned   int64
 	DocsAlreadyClean   int64
 	TxnsRemoved        int64
 	TxnsNotRemoved     int64
+	ObjCacheHits       int64
+	ObjCacheMisses     int64
+}
+
+func (p *IncrementalPruner) Prune(args IncrementalPruneArgs) (PrunerStats, error) {
+	tStart := time.Now()
+	stop := make(chan struct{}, 0)
+	p.startReportingThread(stop)
+	errorCh := make(chan error, 100)
+	var wg sync.WaitGroup
+
+	wg.Add(2)
+	go p.pruneThread(stop, errorCh, &wg, args.Txns, args.MaxTime, false)
+	go p.pruneThread(stop, errorCh, &wg, args.Txns, args.MaxTime, true)
+
+	wg.Wait()
+	close(stop)
+	select {
+	case err := <-errorCh:
+		if err != nil {
+			return p.stats, errors.Trace(err)
+		}
+	default:
+	}
+	hits := p.strCache.HitCounts()
+	p.stats.ObjCacheHits = hits.Hit
+	p.stats.ObjCacheMisses = hits.Miss
+	// TODO: Now we should iterate over txns.Stash and remove documents that aren't referenced by any transactions.
+	// Essentially, any document in txns.Stash that has 0 entries in its txn-queue.
+	logger.Infof("pruning removed %d txns and cleaned %d docs in %s.",
+		atomic.LoadInt64(&p.stats.TxnsRemoved),
+		atomic.LoadInt64(&p.stats.DocQueuesCleaned),
+		time.Since(tStart).Round(time.Millisecond))
+	logger.Debugf("prune stats: %s", pretty.Sprint(p.stats))
+	return p.stats, nil
+}
+
+func checkTime(toAdd *time.Duration) func() {
+	tStart := time.Now()
+	return func() {
+		atomic.AddInt64((*int64)(toAdd), int64(time.Since(tStart)))
+	}
 }
 
 func (p *IncrementalPruner) startReportingThread(stop <-chan struct{}) {
@@ -154,47 +198,17 @@ func (p *IncrementalPruner) pruneThread(
 	wg.Done()
 }
 
-func (p *IncrementalPruner) Prune(args IncrementalPruneArgs) (PrunerStats, error) {
+func (p *IncrementalPruner) cleanupStash(txnsStash *mgo.Collection) error {
 	tStart := time.Now()
-	stop := make(chan struct{}, 0)
-	p.startReportingThread(stop)
-	errorCh := make(chan error, 100)
-	var wg sync.WaitGroup
-
-	wg.Add(2)
-	go p.pruneThread(stop, errorCh, &wg, args.Txns, args.MaxTime, false)
-	go p.pruneThread(stop, errorCh, &wg, args.Txns, args.MaxTime, true)
-
-	wg.Wait()
-	close(stop)
-	select {
-	case err := <-errorCh:
-		if err != nil {
-			return p.stats, errors.Trace(err)
-		}
-	default:
+	info, err := txnsStash.RemoveAll(
+		bson.M{"txn-queue.0": bson.M{"$exists": 0}},
+	)
+	p.stats.StashRemoveTime = time.Since(tStart)
+	p.stats.StashDocsRemoved = int64(info.Removed)
+	if err != nil {
+		return errors.Trace(err)
 	}
-	// TODO: Now we should iterate over txns.Stash and remove documents that aren't referenced by any transactions.
-	// Essentially, any document in txns.Stash that has 0 entries in its txn-queue.
-	logger.Infof("pruning removed %d txns and cleaned %d docs in %s.",
-		atomic.LoadInt64(&p.stats.TxnsRemoved),
-		atomic.LoadInt64(&p.stats.DocQueuesCleaned),
-		time.Since(tStart).Round(time.Millisecond))
-	logger.Debugf("prune stats: %s", pretty.Sprint(p.stats))
-	return p.stats, nil
-}
-
-func checkTime(toAdd *time.Duration) func() {
-	tStart := time.Now()
-	return func() {
-		atomic.AddInt64((*int64)(toAdd), int64(time.Since(tStart)))
-	}
-}
-
-type removeResult struct {
-	TxnRemoveCount int
-	TxnTime        time.Duration
-	err            error
+	return nil
 }
 
 func (p *IncrementalPruner) pruneNextBatch(iter *mgo.Iter, txnsColl, txnsStash *mgo.Collection, errorCh chan error, wg *sync.WaitGroup) (bool, error) {
@@ -506,7 +520,8 @@ func (p *IncrementalPruner) cleanupDocs(
 					if err != mgo.ErrNotFound {
 						return nil, errors.Trace(err)
 					}
-					// Look in txns.stash
+					// Look in txns.stash. One option here is to just delete the document if there are no more
+					// references in the queue.
 					err := txnsStash.UpdateId(stashDocKey{
 						Collection: docKey.Collection,
 						Id:         docKey.DocId,
