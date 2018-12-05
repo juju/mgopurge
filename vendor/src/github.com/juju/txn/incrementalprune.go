@@ -28,6 +28,7 @@ type IncrementalPruner struct {
 	docCache     DocCache
 	missingCache MissingKeyCache
 	strCache     *lru.StringCache
+	strMu        sync.Mutex
 	stats        PrunerStats
 }
 
@@ -160,8 +161,9 @@ func (p *IncrementalPruner) Prune(args IncrementalPruneArgs) (PrunerStats, error
 	errorCh := make(chan error, 100)
 	var wg sync.WaitGroup
 
-	wg.Add(1)
+	wg.Add(2)
 	go p.pruneThread(stop, errorCh, &wg, args.Txns, args.MaxTime, false)
+	go p.pruneThread(stop, errorCh, &wg, args.Txns, args.MaxTime, true)
 
 	wg.Wait()
 	close(stop)
@@ -288,13 +290,16 @@ func (p *IncrementalPruner) lookupDocsInCache(keys docKeySet) (docMap, map[strin
 }
 
 func (p *IncrementalPruner) cacheString(s string) string {
-	return p.strCache.Intern(s)
+	p.strMu.Lock()
+	s = p.strCache.Intern(s)
+	p.strMu.Unlock()
+	return s
 }
 
 func (p *IncrementalPruner) cacheObj(obj interface{}) interface{} {
 	// technically this might not be a string, but 90% of the time it is.
 	if s, ok := obj.(string); ok {
-		return p.strCache.Intern(s)
+		return p.cacheString(s)
 	}
 	return obj
 }
@@ -309,7 +314,7 @@ func (p *IncrementalPruner) cacheKey(key docKey) docKey {
 }
 
 func (p *IncrementalPruner) cacheTxnId(objId bson.ObjectId) bson.ObjectId {
-	return bson.ObjectId(p.strCache.Intern(string(objId)))
+	return bson.ObjectId(p.cacheString(string(objId)))
 }
 
 func (p *IncrementalPruner) cacheDoc(collection string, docId interface{}, queue []string, docs docMap) docWithQueue {
@@ -332,10 +337,13 @@ func (p *IncrementalPruner) cacheDoc(collection string, docId interface{}, queue
 // DocCache is a type-aware LRU Cache
 type DocCache struct {
 	cache *lru.LRU
+	mu    sync.Mutex
 }
 
 func (dc *DocCache) Get(key docKey) (docWithQueue, bool) {
+	dc.mu.Lock()
 	res, exists := dc.cache.Get(key)
+	dc.mu.Unlock()
 	if exists {
 		return res.(docWithQueue), true
 	}
@@ -343,20 +351,27 @@ func (dc *DocCache) Get(key docKey) (docWithQueue, bool) {
 }
 
 func (dc *DocCache) Add(key docKey, doc docWithQueue) {
+	dc.mu.Lock()
 	dc.cache.Add(key, doc)
+	dc.mu.Unlock()
 }
 
 // MissingKeyCache is a simplified LRU cache tracking missing keys
 type MissingKeyCache struct {
 	cache *lru.LRU
+	mu    sync.Mutex
 }
 
 func (mkc *MissingKeyCache) KnownMissing(key docKey) {
+	mkc.mu.Lock()
 	mkc.cache.Add(key, nil)
+	mkc.mu.Unlock()
 }
 
 func (mkc *MissingKeyCache) IsMissing(key docKey) bool {
+	mkc.mu.Lock()
 	_, present := mkc.cache.Get(key)
+	mkc.mu.Unlock()
 	return present
 }
 
