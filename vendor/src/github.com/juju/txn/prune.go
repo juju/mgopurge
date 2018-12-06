@@ -265,7 +265,6 @@ func startReportingThread(stop <-chan struct{}, progressCh chan ProgressMessage)
 			case msg := <-progressCh:
 				txnsRemoved += msg.TxnsRemoved
 				docsCleaned += msg.DocsCleaned
-				logger.Debugf("progress update: %# v", msg)
 			case <-next:
 				txnRate := 0.0
 				since := time.Since(tStart).Seconds()
