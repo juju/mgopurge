@@ -15,6 +15,10 @@ import (
 )
 
 const pruneTxnBatchSize = 1000
+const pruneMinTxnBatchSize = 10
+const pruneMaxTxnBatchSize = 10000
+const defaultBatchSleepTime time.Duration = 0
+const maxBatchSleepTime = 1 * time.Second
 const queryDocBatchSize = 100
 const pruneDocCacheSize = 10000
 const missingKeyCacheSize = 2000
@@ -24,14 +28,16 @@ const strCacheSize = 10000
 // and then moves on to newer transactions. It only thinks about 1k txns at a time, because that is the batch size that
 // can be deleted. Instead, it caches documents that it has seen.
 type IncrementalPruner struct {
-	maxTime      time.Time
-	reverse      bool
-	ProgressChan chan ProgressMessage
-	docCache     docCache
-	missingCache missingKeyCache
-	strCache     *lru.StringCache
-	strMu        sync.Mutex
-	stats        PrunerStats
+	maxTime        time.Time
+	reverse        bool
+	txnBatchSize   int
+	batchSleepTime time.Duration
+	ProgressChan   chan ProgressMessage
+	docCache       docCache
+	missingCache   missingKeyCache
+	strCache       *lru.StringCache
+	strMu          sync.Mutex
+	stats          PrunerStats
 }
 
 type ProgressMessage struct {
@@ -54,6 +60,16 @@ type IncrementalPruneArgs struct {
 	// ReverseOrder indicates we should process transactions from newest to
 	// oldest instead of form oldest to newest.
 	ReverseOrder bool
+
+	// TxnBatchSize is how many transaction to process at once.
+	TxnBatchSize int
+
+	// TxnBatchSleepTime is how long we should sleep between processing transaction
+	// batches, to allow other parts of the system to operate (avoid consuming
+	// all resources)
+	// The default is to not sleep at all, but this can be configured to reduce
+	// load while pruning.
+	TxnBatchSleepTime time.Duration
 }
 
 // PrunerStats collects statistics about how the prune progressed
@@ -116,9 +132,25 @@ func CombineStats(a, b PrunerStats) PrunerStats {
 }
 
 func NewIncrementalPruner(args IncrementalPruneArgs) *IncrementalPruner {
+	if args.TxnBatchSize == 0 {
+		args.TxnBatchSize = pruneTxnBatchSize
+	}
+	if args.TxnBatchSize < pruneMinTxnBatchSize {
+		args.TxnBatchSize = pruneMinTxnBatchSize
+	}
+	if args.TxnBatchSize > pruneMaxTxnBatchSize {
+		args.TxnBatchSize = pruneMaxTxnBatchSize
+	}
+	if args.TxnBatchSleepTime < 0 {
+		args.TxnBatchSleepTime = defaultBatchSleepTime
+	}
+	if args.TxnBatchSleepTime > maxBatchSleepTime {
+		args.TxnBatchSleepTime = maxBatchSleepTime
+	}
 	return &IncrementalPruner{
 		maxTime:      args.MaxTime,
 		reverse:      args.ReverseOrder,
+		txnBatchSize: args.TxnBatchSize,
 		ProgressChan: args.ProgressChannel,
 		docCache:     docCache{cache: lru.New(pruneDocCacheSize)},
 		missingCache: missingKeyCache{cache: lru.New(missingKeyCacheSize)},
@@ -146,6 +178,9 @@ func (p *IncrementalPruner) Prune(txns *mgo.Collection) (PrunerStats, error) {
 			// to process the error chan in case the txn deletion routines
 			// also encounter errors.
 			errorCh <- errors.Trace(err)
+		}
+		if !done && p.batchSleepTime != 0 {
+			time.Sleep(p.batchSleepTime)
 		}
 	}
 	if err := iter.Close(); err != nil {
@@ -196,7 +231,7 @@ func (p *IncrementalPruner) findTxnsQuery(txns *mgo.Collection) *mgo.Iter {
 	} else {
 		query.Sort("_id")
 	}
-	query.Batch(pruneTxnBatchSize)
+	query.Batch(p.txnBatchSize)
 	return query.Iter()
 
 }
@@ -264,11 +299,11 @@ func (p *IncrementalPruner) findTxnsAndDocsToLookup(iter *mgo.Iter) (bool, []txn
 	defer checkTime(&p.stats.TxnReadTime)()
 	done := false
 	// First, read all the txns to find the document identities we might care about
-	txns := make([]txnDoc, 0, pruneTxnBatchSize)
+	txns := make([]txnDoc, 0, p.txnBatchSize)
 	// We expect a doc in each txn
-	docsToCheck := make(docKeySet, pruneTxnBatchSize)
+	docsToCheck := make(docKeySet, p.txnBatchSize)
 	txnsBeingCleaned := make(map[bson.ObjectId]struct{})
-	for count := 0; count < pruneTxnBatchSize; count++ {
+	for count := 0; count < p.txnBatchSize; count++ {
 		var txn txnDoc
 		if iter.Next(&txn) {
 			txn.Id = p.cacheTxnId(txn.Id)

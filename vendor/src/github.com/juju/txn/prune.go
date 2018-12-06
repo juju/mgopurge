@@ -220,11 +220,37 @@ type CleanAndPruneArgs struct {
 
 	// Multithreaded will start multiple pruning passes concurrently
 	Multithreaded bool
+
+	// TxnBatchSize is how many transaction to process at once.
+	TxnBatchSize int
+
+	// TxnBatchSleepTime is how long we should sleep between processing transaction
+	// batches, to allow other parts of the system to operate (avoid consuming
+	// all resources)
+	// The default is to not sleep at all, but this can be configured to reduce
+	// load while pruning.
+	TxnBatchSleepTime time.Duration
 }
 
 func (args *CleanAndPruneArgs) validate() error {
 	if args.Txns == nil {
 		return errors.New("nil Txns not valid")
+	}
+	if args.TxnBatchSleepTime < 0 || args.TxnBatchSleepTime > maxBatchSleepTime {
+		return errors.Errorf("TxnBatchSleepTime (%s) must be between 0s and %s",
+			args.TxnBatchSleepTime, maxBatchSleepTime)
+	}
+	// A value of 0 indicates that we should use the default as it hasn't been set
+	if args.TxnBatchSize == 0 {
+		args.TxnBatchSize = pruneTxnBatchSize
+	}
+	if args.TxnBatchSize < pruneMinTxnBatchSize {
+		return errors.Errorf("TxnBatchSize %d too small, must be between %d and %d",
+			args.TxnBatchSize, pruneMinTxnBatchSize, pruneMaxTxnBatchSize)
+	}
+	if args.TxnBatchSize > pruneMaxTxnBatchSize {
+		return errors.Errorf("TxnBatchSize %d too big, must be between %d and %d",
+			args.TxnBatchSize, pruneMinTxnBatchSize, pruneMaxTxnBatchSize)
 	}
 	return nil
 }
@@ -297,9 +323,11 @@ func CleanAndPrune(args CleanAndPruneArgs) (CleanupStats, error) {
 	var anyErr error
 	prune := func(reversed bool) {
 		pruner := NewIncrementalPruner(IncrementalPruneArgs{
-			MaxTime:         args.MaxTime,
-			ProgressChannel: progressCh,
-			ReverseOrder:    reversed,
+			MaxTime:           args.MaxTime,
+			ProgressChannel:   progressCh,
+			ReverseOrder:      reversed,
+			TxnBatchSize:      args.TxnBatchSize,
+			TxnBatchSleepTime: args.TxnBatchSleepTime,
 		})
 		stats, err := pruner.Prune(args.Txns)
 		mu.Lock()
