@@ -4,7 +4,6 @@
 package txn
 
 import (
-	"sort"
 	"sync"
 	"time"
 
@@ -483,107 +482,52 @@ func (p *IncrementalPruner) updateDocsFromStash(
 	return nil
 }
 
-func (p *IncrementalPruner) groupDocsByCollection(foundDocs docMap, txns []txnDoc) map[string]map[interface{}]docWithQueue {
-	docsByCollectionAndId := make(map[string]map[interface{}]docWithQueue)
-	// Iterate the the transactions, and group the docs to clean by collection
-	for _, txn := range txns {
-		missingDocKeys := make([]docKey, 0)
-		for _, docKey := range txn.Ops {
-			collMap := docsByCollectionAndId[docKey.Collection]
-			if collMap == nil {
-				collMap = make(map[interface{}]docWithQueue)
-				docsByCollectionAndId[docKey.Collection] = collMap
-			}
-			if _, ok := collMap[docKey.DocId]; ok {
-				// already queued this doc
-				continue
-			}
-			doc, ok := foundDocs[docKey]
-			if !ok {
-				if p.missingCache.IsMissing(docKey) {
-					continue
-				}
-				p.stats.DocsMissing++
-				p.missingCache.KnownMissing(docKey)
-				if docKey.Collection == "metrics" {
-					// XXX: This is a special case. Metrics are *known* to violate the transaction guarantees
-					// by removing documents directly from the collection, without using a transaction. Even
-					// though they are *created* with transactions... bad metrics, bad dog
-					logger.Tracef("ignoring missing metrics doc: %v", docKey)
-				} else {
-					missingDocKeys = append(missingDocKeys, docKey)
-				}
-				continue
-			}
-			collMap[docKey.DocId] = doc
-		}
-		if len(missingDocKeys) > 0 {
-			// This might be corruption, or might be an issue, but humans probably can't do anything about it anyway
-			logger.Infof("transaction %q referenced documents that could not be found: %v",
-				txn.Id.Hex(), missingDocKeys)
-		}
-	}
-	return docsByCollectionAndId
-}
-
-type docToCleanup struct {
-	id           interface{}
-	tokensToPull []string
-	newQueue     []string
-	newTxnIds    []bson.ObjectId
-}
-type collectionToCleanup struct {
-	collection    string
-	docsToCleanup []docToCleanup
-}
-
-func (p *IncrementalPruner) sortDocsToProcess(
+func (p *IncrementalPruner) cleanupDoc(
+	collection string,
+	doc docWithQueue,
 	txnsBeingCleaned map[bson.ObjectId]struct{},
-	docsByCollectionAndId map[string]map[interface{}]docWithQueue,
-) []collectionToCleanup {
-	todo := make([]collectionToCleanup, 0, len(docsByCollectionAndId))
-	// Now we have all the documents we want to handle, sort them nicely and remove ones that don't have any updates
-	// We try to sort by the string form of their Id(), but if it isn't a string, we don't bother
-	for collection, mappedDocs := range docsByCollectionAndId {
-		keys := make([]string, 0, len(mappedDocs))
-		byId := make(map[string]docToCleanup)
-		collCleanup := collectionToCleanup{
-			collection: collection,
+	db *mgo.Database,
+	txnsStash *mgo.Collection,
+) (bool, error) {
+	tokensToPull, newQueue, newTxnIds := p.findTxnsToPull(doc, txnsBeingCleaned)
+	if len(tokensToPull) == 0 {
+		// Nothing to do for this doc
+		p.stats.DocsAlreadyClean++
+		return false, nil
+	}
+	coll := db.C(collection)
+	p.stats.DocTokensCleaned += int64(len(tokensToPull))
+	p.stats.DocQueuesCleaned++
+	pull := bson.M{"$pullAll": bson.M{"txn-queue": tokensToPull}}
+	err := coll.UpdateId(doc.Id, pull)
+	if err != nil {
+		if err != mgo.ErrNotFound {
+			return false, errors.Trace(err)
 		}
-		for _, doc := range mappedDocs {
-			if len(doc.Queue) == 0 {
-				// nothing to do
-				p.stats.DocsAlreadyClean++
-				continue
-			}
-			tokensToPull, newQueue, newTxns := p.findTxnsToPull(doc, txnsBeingCleaned)
-			if len(tokensToPull) == 0 {
-				// Nothing to do for this doc
-				p.stats.DocsAlreadyClean++
-				continue
-			}
-			cleanup := docToCleanup{
-				id:           doc.Id,
-				tokensToPull: tokensToPull,
-				newQueue:     newQueue,
-				newTxnIds:    newTxns,
-			}
-			if s, ok := doc.Id.(string); ok {
-				keys = append(keys, s)
-				byId[s] = cleanup
+		// Look in txns.stash. One option here is to just delete the document if there are no more
+		// references in the queue.
+		err := txnsStash.UpdateId(stashDocKey{
+			Collection: collection,
+			Id:         doc.Id,
+		}, pull)
+		if err != nil {
+			if err == mgo.ErrNotFound {
+				logger.Warningf("trying to cleanup doc %v, could not be found in collection %q nor stash",
+					doc.Id, collection)
 			} else {
-				collCleanup.docsToCleanup = append(collCleanup.docsToCleanup, cleanup)
+				return false, errors.Trace(err)
 			}
-		}
-		sort.Strings(keys)
-		for _, key := range keys {
-			collCleanup.docsToCleanup = append(collCleanup.docsToCleanup, byId[key])
-		}
-		if len(collCleanup.docsToCleanup) > 0 {
-			todo = append(todo, collCleanup)
 		}
 	}
-	return todo
+	dKey := docKey{
+		Collection: collection,
+		DocId:      doc.Id,
+	}
+	doc.Queue = newQueue
+	doc.txns = newTxnIds
+	// Update the known Queue of the document, since we cleaned it.
+	p.docCache.Add(dKey, doc)
+	return true, nil
 }
 
 func (p *IncrementalPruner) cleanupDocs(
@@ -594,47 +538,44 @@ func (p *IncrementalPruner) cleanupDocs(
 	txnsStash *mgo.Collection,
 ) error {
 	defer checkTime(&p.stats.DocCleanupTime)()
-	docsByCollection := p.groupDocsByCollection(foundDocs, txns)
-	todo := p.sortDocsToProcess(txnsBeingCleaned, docsByCollection)
-
 	docsCleanedUp := 0
-	for _, collectionCleanup := range todo {
-		coll := db.C(collectionCleanup.collection)
-		for _, docCleanup := range collectionCleanup.docsToCleanup {
-			p.stats.DocTokensCleaned += int64(len(docCleanup.tokensToPull))
-			p.stats.DocQueuesCleaned++
-			pull := bson.M{"$pullAll": bson.M{"txn-queue": docCleanup.tokensToPull}}
-			err := coll.UpdateId(docCleanup.id, pull)
+	for _, txn := range txns {
+		missingDocKeys := make([]docKey, 0)
+		for _, docKey := range txn.Ops {
+			if p.missingCache.IsMissing(docKey) {
+				// Document known to be missing
+				continue
+			}
+			doc, ok := foundDocs[docKey]
+			if !ok {
+				if p.missingCache.IsMissing(docKey) {
+					continue
+				}
+				p.stats.DocsMissing++
+				p.missingCache.KnownMissing(docKey)
+				if docKey.Collection == "metrics" {
+					// Note: (jam 2018-12-06) This is a special case. Metrics are
+					// *known* to violate the transaction guarantees. The are
+					// created and updated with the transaction logic, but are
+					// removed in bulk without transaction logic.
+					logger.Tracef("ignoring missing metrics doc: %v", docKey)
+				} else {
+					missingDocKeys = append(missingDocKeys, docKey)
+				}
+				continue
+			}
+			updated, err := p.cleanupDoc(docKey.Collection, doc, txnsBeingCleaned, db, txnsStash)
 			if err != nil {
-				if err != mgo.ErrNotFound {
-					return errors.Trace(err)
-				}
-				// Look in txns.stash. One option here is to just delete the document if there are no more
-				// references in the queue.
-				err := txnsStash.UpdateId(stashDocKey{
-					Collection: collectionCleanup.collection,
-					Id:         docCleanup.id,
-				}, pull)
-				if err != nil {
-					if err == mgo.ErrNotFound {
-						logger.Warningf("trying to cleanup doc %v, could not be found in collection %q nor stash",
-							docCleanup.id, collectionCleanup.collection)
-					} else {
-						return errors.Trace(err)
-					}
-				}
+				return errors.Trace(err)
 			}
-			docsCleanedUp++
-			dKey := docKey{
-				Collection: collectionCleanup.collection,
-				DocId:      docCleanup.id,
+			if updated {
+				docsCleanedUp++
 			}
-			// Update the known Queue of the document, since we cleaned it.
-			p.docCache.Add(dKey, docWithQueue{
-				Id:    docCleanup.id,
-				Queue: docCleanup.newQueue,
-				txns:  docCleanup.newTxnIds,
-			})
+		}
+		if len(missingDocKeys) > 0 {
+			// This might be corruption, or might be an issue, but humans probably can't do anything about it anyway
+			logger.Infof("transaction %q referenced documents that could not be found: %v",
+				txn.Id.Hex(), missingDocKeys)
 		}
 	}
 	if docsCleanedUp > 0 && p.ProgressChan != nil {
