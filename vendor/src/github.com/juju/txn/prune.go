@@ -6,10 +6,11 @@ package txn
 import (
 	"fmt"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/juju/errors"
-	"github.com/juju/lru"
+	"github.com/kr/pretty"
 	"gopkg.in/mgo.v2"
 	"gopkg.in/mgo.v2/bson"
 )
@@ -216,6 +217,9 @@ type CleanAndPruneArgs struct {
 	// MaxTransactionsToProcess defines how many completed transactions that we will evaluate in this batch.
 	// A value of 0 indicates we should evaluate all completed transactions.
 	MaxTransactionsToProcess int
+
+	// Multithreaded will start multiple pruning passes concurrently
+	Multithreaded bool
 }
 
 func (args *CleanAndPruneArgs) validate() error {
@@ -248,30 +252,86 @@ type CleanupStats struct {
 	ShouldRetry bool
 }
 
+func startReportingThread(stop <-chan struct{}, progressCh chan ProgressMessage) {
+	tStart := time.Now()
+	next := time.After(15 * time.Second)
+	go func() {
+		txnsRemoved := 0
+		docsCleaned := 0
+		for {
+			select {
+			case <-stop:
+				return
+			case msg := <-progressCh:
+				txnsRemoved += msg.TxnsRemoved
+				docsCleaned += msg.DocsCleaned
+				logger.Debugf("progress update: %# v", msg)
+			case <-next:
+				txnRate := 0.0
+				since := time.Since(tStart).Seconds()
+				if since > 0 {
+					txnRate = float64(txnsRemoved) / since
+				}
+				logger.Debugf("pruning has removed %d txns (%.0ftxn/s) cleaning %d docs ",
+					txnsRemoved, txnRate, docsCleaned)
+				next = time.After(15 * time.Second)
+			}
+		}
+	}()
+}
+
 // CleanAndPrune runs the cleanup steps, and then follows up with pruning all
 // of the transactions that are no longer referenced.
 func CleanAndPrune(args CleanAndPruneArgs) (CleanupStats, error) {
+	tStart := time.Now()
 	var stats CleanupStats
 
 	if err := args.validate(); err != nil {
 		return stats, err
 	}
-
-	pruner := IncrementalPruner{
-		docCache:     DocCache{cache: lru.New(pruneDocCacheSize)},
-		missingCache: MissingKeyCache{cache: lru.New(missingKeyCacheSize)},
-		strCache:     lru.NewStringCache(strCacheSize),
+	stop := make(chan struct{})
+	progressCh := make(chan ProgressMessage)
+	startReportingThread(stop, progressCh)
+	var wg sync.WaitGroup
+	var mu sync.Mutex
+	var pstats PrunerStats
+	var anyErr error
+	prune := func(reversed bool) {
+		pruner := NewIncrementalPruner(IncrementalPruneArgs{
+			Txns:            args.Txns,
+			MaxTime:         args.MaxTime,
+			ProgressChannel: progressCh,
+			ReverseOrder:    reversed,
+		})
+		stats, err := pruner.Prune()
+		logger.Criticalf("updating stats: %# v", stats)
+		mu.Lock()
+		pstats = CombineStats(pstats, stats)
+		if anyErr == nil {
+			anyErr = errors.Trace(err)
+		}
+		mu.Unlock()
+		wg.Done()
 	}
-	pstats, err := pruner.Prune(IncrementalPruneArgs{
-		Txns:    args.Txns,
-		MaxTime: args.MaxTime,
-	})
-	if err != nil {
-		return stats, errors.Trace(err)
+	if args.Multithreaded {
+		wg.Add(1)
+		go prune(true)
 	}
+	wg.Add(1)
+	prune(false)
+	wg.Wait()
+	close(stop)
+	if anyErr != nil {
+		return stats, errors.Trace(anyErr)
+	}
+	logger.Infof("pruning removed %d txns and cleaned %d docs in %s.",
+		pstats.TxnsRemoved,
+		pstats.DocQueuesCleaned,
+		time.Since(tStart).Round(time.Millisecond))
+	logger.Debugf("prune stats: %s", pretty.Sprint(pstats))
 	stats.TransactionsRemoved = int(pstats.TxnsRemoved)
 	stats.DocsCleaned = int(pstats.DocQueuesCleaned)
-	stats.StashDocumentsRemoved = 0
+	stats.StashDocumentsRemoved = int(pstats.StashDocsRemoved)
 	stats.DocsInspected = int(pstats.DocCacheMisses + pstats.DocCacheHits)
 	return stats, nil
 }
