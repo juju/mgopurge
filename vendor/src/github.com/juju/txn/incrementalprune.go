@@ -500,6 +500,9 @@ func (p *IncrementalPruner) groupDocsByCollection(foundDocs docMap, txns []txnDo
 			}
 			doc, ok := foundDocs[docKey]
 			if !ok {
+				if p.missingCache.IsMissing(docKey) {
+					continue
+				}
 				p.stats.DocsMissing++
 				p.missingCache.KnownMissing(docKey)
 				if docKey.Collection == "metrics" {
