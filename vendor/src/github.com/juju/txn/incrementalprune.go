@@ -172,7 +172,9 @@ func (p *IncrementalPruner) Prune(txns *mgo.Collection) (PrunerStats, error) {
 	hits := p.strCache.HitCounts()
 	p.stats.ObjCacheHits = hits.Hit
 	p.stats.ObjCacheMisses = hits.Miss
-	// TODO: Now cleanup txns.stash
+	if firstErr == nil {
+		firstErr = p.cleanupStash(txnsStash)
+	}
 	logger.Debugf("pruneStats: %# v", pretty.Sprint(p.stats))
 	return p.stats, errors.Trace(firstErr)
 }
