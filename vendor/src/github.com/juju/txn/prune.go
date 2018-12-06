@@ -297,13 +297,11 @@ func CleanAndPrune(args CleanAndPruneArgs) (CleanupStats, error) {
 	var anyErr error
 	prune := func(reversed bool) {
 		pruner := NewIncrementalPruner(IncrementalPruneArgs{
-			Txns:            args.Txns,
 			MaxTime:         args.MaxTime,
 			ProgressChannel: progressCh,
 			ReverseOrder:    reversed,
 		})
-		stats, err := pruner.Prune()
-		logger.Criticalf("updating stats: %# v", stats)
+		stats, err := pruner.Prune(args.Txns)
 		mu.Lock()
 		pstats = CombineStats(pstats, stats)
 		if anyErr == nil {

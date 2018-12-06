@@ -4,11 +4,13 @@
 package txn
 
 import (
+	"sort"
 	"sync"
 	"time"
 
 	"github.com/juju/errors"
 	"github.com/juju/lru"
+	"github.com/kr/pretty"
 	"gopkg.in/mgo.v2"
 	"gopkg.in/mgo.v2/bson"
 )
@@ -23,7 +25,6 @@ const strCacheSize = 10000
 // and then moves on to newer transactions. It only thinks about 1k txns at a time, because that is the batch size that
 // can be deleted. Instead, it caches documents that it has seen.
 type IncrementalPruner struct {
-	txns         *mgo.Collection
 	maxTime      time.Time
 	reverse      bool
 	ProgressChan chan ProgressMessage
@@ -41,12 +42,6 @@ type ProgressMessage struct {
 
 // IncrementalPruneArgs specifies the parameters for running incremental cleanup steps..
 type IncrementalPruneArgs struct {
-	// Txns is the collection that holds all of the transactions that we
-	// might want to prune. We will also make use of Txns.Database to find
-	// all of the collections that might make use of transactions from that
-	// collection.
-	Txns *mgo.Collection
-
 	// MaxTime is a timestamp that provides a threshold of transactions
 	// that we will actually prune. Only transactions that were created
 	// before this threshold will be pruned.
@@ -123,7 +118,6 @@ func CombineStats(a, b PrunerStats) PrunerStats {
 
 func NewIncrementalPruner(args IncrementalPruneArgs) *IncrementalPruner {
 	return &IncrementalPruner{
-		txns:         args.Txns,
 		maxTime:      args.MaxTime,
 		reverse:      args.ReverseOrder,
 		ProgressChan: args.ProgressChannel,
@@ -133,10 +127,10 @@ func NewIncrementalPruner(args IncrementalPruneArgs) *IncrementalPruner {
 	}
 }
 
-func (p *IncrementalPruner) Prune() (PrunerStats, error) {
-	session := p.txns.Database.Session.Copy()
+func (p *IncrementalPruner) Prune(txns *mgo.Collection) (PrunerStats, error) {
+	session := txns.Database.Session.Copy()
 	defer session.Close()
-	txns := p.txns.With(session)
+	txns = txns.With(session)
 	txnsStashName := txns.Name + ".stash"
 	txnsStash := txns.Database.C(txnsStashName)
 	errorCh := make(chan error, 100)
@@ -178,6 +172,8 @@ func (p *IncrementalPruner) Prune() (PrunerStats, error) {
 	hits := p.strCache.HitCounts()
 	p.stats.ObjCacheHits = hits.Hit
 	p.stats.ObjCacheMisses = hits.Miss
+	// TODO: Now cleanup txns.stash
+	logger.Debugf("pruneStats: %# v", pretty.Sprint(p.stats))
 	return p.stats, errors.Trace(firstErr)
 }
 
@@ -231,12 +227,16 @@ func (p *IncrementalPruner) pruneNextBatch(iter *mgo.Iter, txnsColl, txnsStash *
 	if err != nil {
 		return done, errors.Trace(err)
 	}
-	txnsToDelete, err := p.cleanupDocs(docsToCheck, foundDocs, txns, txnsBeingCleaned, txnsColl.Database, txnsStash)
-	if err != nil {
+
+	if err := p.cleanupDocs(foundDocs, txns, txnsBeingCleaned, txnsColl.Database, txnsStash); err != nil {
 		return done, errors.Trace(err)
 	}
-	if len(txnsToDelete) > 0 {
-		p.removeTxns(txnsToDelete, txnsColl, errorCh, wg)
+	if len(txns) > 0 {
+		txnsToRemove := make([]bson.ObjectId, len(txns))
+		for i, txn := range txns {
+			txnsToRemove[i] = txn.Id
+		}
+		p.removeTxns(txnsToRemove, txnsColl, errorCh, wg)
 	}
 	return done, nil
 }
@@ -481,26 +481,21 @@ func (p *IncrementalPruner) updateDocsFromStash(
 	return nil
 }
 
-func (p *IncrementalPruner) cleanupDocs(
-	docsToCheck docKeySet,
-	foundDocs docMap,
-	txns []txnDoc,
-	txnsBeingCleaned map[bson.ObjectId]struct{},
-	db *mgo.Database,
-	txnsStash *mgo.Collection,
-) ([]bson.ObjectId, error) {
-	defer checkTime(&p.stats.DocCleanupTime)()
-	txnsToDelete := make([]bson.ObjectId, 0, pruneTxnBatchSize)
-	// TODO(jam): 2018-11-30 Currently this operates in txn order, iterating all the txns, finding docs to cleanup.
-	// We could, instead, iterate the txn order, then build up documents in each collection to clean, and then issue
-	// a single cleanup per collection.
-	// However, I'm not sure how that interacts with txns.stash, as we need to know which documents we failed to update.
-	// At least this code pulls all txns in the current batch in each pass. Though if you have the same docs over and
-	// over, you end up iterating the list to find there is nothing to pull multiple times.
-	docsCleanedUp := 0
+func (p *IncrementalPruner) groupDocsByCollection(foundDocs docMap, txns []txnDoc) map[string]map[interface{}]docWithQueue {
+	docsByCollectionAndId := make(map[string]map[interface{}]docWithQueue)
+	// Iterate the the transactions, and group the docs to clean by collection
 	for _, txn := range txns {
-		txnCanBeRemoved := true
+		missingDocKeys := make([]docKey, 0)
 		for _, docKey := range txn.Ops {
+			collMap := docsByCollectionAndId[docKey.Collection]
+			if collMap == nil {
+				collMap = make(map[interface{}]docWithQueue)
+				docsByCollectionAndId[docKey.Collection] = collMap
+			}
+			if _, ok := collMap[docKey.DocId]; ok {
+				// already queued this doc
+				continue
+			}
 			doc, ok := foundDocs[docKey]
 			if !ok {
 				p.stats.DocsMissing++
@@ -510,66 +505,137 @@ func (p *IncrementalPruner) cleanupDocs(
 					// by removing documents directly from the collection, without using a transaction. Even
 					// though they are *created* with transactions... bad metrics, bad dog
 					logger.Tracef("ignoring missing metrics doc: %v", docKey)
-				} else if docKey.Collection == "cloudimagemetadata" {
-					// There is an upgrade step in 2.3.4 that bulk deletes all cloudimagemetadata that have particular
-					// attributes, ignoring transactions...
-					logger.Tracef("ignoring missing cloudimagemetadat doc: %v", docKey)
 				} else {
-					logger.Warningf("transaction %q referenced document %v but it could not be found",
-						txn.Id.Hex(), docKey)
-					// This is usually a sign of corruption, but for the purposes of pruning, we'll just treat it as a
-					// transaction that cannot be cleaned up.
-					txnCanBeRemoved = false
+					missingDocKeys = append(missingDocKeys, docKey)
 				}
 				continue
 			}
-			tokensToPull, newQueue, newTxns := p.findTxnsToPull(doc, txnsBeingCleaned)
-			if len(tokensToPull) > 0 {
-				p.stats.DocTokensCleaned += int64(len(tokensToPull))
-				p.stats.DocQueuesCleaned++
-				coll := db.C(docKey.Collection)
-				pull := bson.M{"$pullAll": bson.M{"txn-queue": tokensToPull}}
-				err := coll.UpdateId(docKey.DocId, pull)
-				if err != nil {
-					if err != mgo.ErrNotFound {
-						return nil, errors.Trace(err)
-					}
-					// Look in txns.stash. One option here is to just delete the document if there are no more
-					// references in the queue.
-					err := txnsStash.UpdateId(stashDocKey{
-						Collection: docKey.Collection,
-						Id:         docKey.DocId,
-					}, pull)
-					if err != nil {
-						if err == mgo.ErrNotFound {
-							logger.Warningf("trying to cleanup doc %v, could not be found in collection nor stash",
-								docKey)
-							txnCanBeRemoved = false
-							// We don't treat this as a fatal error, just a txn that cannot be cleaned up.
-						}
-						return nil, errors.Trace(err)
-					}
-				}
-				docsCleanedUp++
-				// Update the known Queue of the document, since we cleaned it.
-				doc.Queue = newQueue
-				doc.txns = newTxns
-				p.docCache.Add(docKey, doc)
-			} else {
-				// already clean of transactions we are currently processing
+			collMap[docKey.DocId] = doc
+		}
+		if len(missingDocKeys) > 0 {
+			// This might be corruption, or might be an issue, but humans probably can't do anything about it anyway
+			logger.Infof("transaction %q referenced documents that could not be found: %v",
+				txn.Id.Hex(), missingDocKeys)
+		}
+	}
+	return docsByCollectionAndId
+}
+
+type docToCleanup struct {
+	id           interface{}
+	tokensToPull []string
+	newQueue     []string
+	newTxnIds    []bson.ObjectId
+}
+type collectionToCleanup struct {
+	collection    string
+	docsToCleanup []docToCleanup
+}
+
+func (p *IncrementalPruner) sortDocsToProcess(
+	txnsBeingCleaned map[bson.ObjectId]struct{},
+	docsByCollectionAndId map[string]map[interface{}]docWithQueue,
+) []collectionToCleanup {
+	todo := make([]collectionToCleanup, 0, len(docsByCollectionAndId))
+	// Now we have all the documents we want to handle, sort them nicely and remove ones that don't have any updates
+	// We try to sort by the string form of their Id(), but if it isn't a string, we don't bother
+	for collection, mappedDocs := range docsByCollectionAndId {
+		keys := make([]string, 0, len(mappedDocs))
+		byId := make(map[string]docToCleanup)
+		collCleanup := collectionToCleanup{
+			collection: collection,
+		}
+		for _, doc := range mappedDocs {
+			if len(doc.Queue) == 0 {
+				// nothing to do
 				p.stats.DocsAlreadyClean++
+				continue
+			}
+			tokensToPull, newQueue, newTxns := p.findTxnsToPull(doc, txnsBeingCleaned)
+			if len(tokensToPull) == 0 {
+				// Nothing to do for this doc
+				p.stats.DocsAlreadyClean++
+				continue
+			}
+			cleanup := docToCleanup{
+				id:           doc.Id,
+				tokensToPull: tokensToPull,
+				newQueue:     newQueue,
+				newTxnIds:    newTxns,
+			}
+			if s, ok := doc.Id.(string); ok {
+				keys = append(keys, s)
+				byId[s] = cleanup
+			} else {
+				collCleanup.docsToCleanup = append(collCleanup.docsToCleanup, cleanup)
 			}
 		}
-		if txnCanBeRemoved {
-			txnsToDelete = append(txnsToDelete, txn.Id)
-		} else {
-			p.stats.TxnsNotRemoved++
+		sort.Strings(keys)
+		for _, key := range keys {
+			collCleanup.docsToCleanup = append(collCleanup.docsToCleanup, byId[key])
+		}
+		if len(collCleanup.docsToCleanup) > 0 {
+			todo = append(todo, collCleanup)
+		}
+	}
+	return todo
+}
+
+func (p *IncrementalPruner) cleanupDocs(
+	foundDocs docMap,
+	txns []txnDoc,
+	txnsBeingCleaned map[bson.ObjectId]struct{},
+	db *mgo.Database,
+	txnsStash *mgo.Collection,
+) error {
+	defer checkTime(&p.stats.DocCleanupTime)()
+	docsByCollection := p.groupDocsByCollection(foundDocs, txns)
+	todo := p.sortDocsToProcess(txnsBeingCleaned, docsByCollection)
+
+	docsCleanedUp := 0
+	for _, collectionCleanup := range todo {
+		coll := db.C(collectionCleanup.collection)
+		for _, docCleanup := range collectionCleanup.docsToCleanup {
+			p.stats.DocTokensCleaned += int64(len(docCleanup.tokensToPull))
+			p.stats.DocQueuesCleaned++
+			pull := bson.M{"$pullAll": bson.M{"txn-queue": docCleanup.tokensToPull}}
+			err := coll.UpdateId(docCleanup.id, pull)
+			if err != nil {
+				if err != mgo.ErrNotFound {
+					return errors.Trace(err)
+				}
+				// Look in txns.stash. One option here is to just delete the document if there are no more
+				// references in the queue.
+				err := txnsStash.UpdateId(stashDocKey{
+					Collection: collectionCleanup.collection,
+					Id:         docCleanup.id,
+				}, pull)
+				if err != nil {
+					if err == mgo.ErrNotFound {
+						logger.Warningf("trying to cleanup doc %v, could not be found in collection %q nor stash",
+							docCleanup.id, collectionCleanup.collection)
+					} else {
+						return errors.Trace(err)
+					}
+				}
+			}
+			docsCleanedUp++
+			dKey := docKey{
+				Collection: collectionCleanup.collection,
+				DocId:      docCleanup.id,
+			}
+			// Update the known Queue of the document, since we cleaned it.
+			p.docCache.Add(dKey, docWithQueue{
+				Id:    docCleanup.id,
+				Queue: docCleanup.newQueue,
+				txns:  docCleanup.newTxnIds,
+			})
 		}
 	}
 	if docsCleanedUp > 0 && p.ProgressChan != nil {
 		p.ProgressChan <- ProgressMessage{DocsCleaned: docsCleanedUp}
 	}
-	return txnsToDelete, nil
+	return nil
 }
 
 func (p *IncrementalPruner) findTxnsToPull(doc docWithQueue, txnsBeingCleaned map[bson.ObjectId]struct{}) ([]string, []string, []bson.ObjectId) {
