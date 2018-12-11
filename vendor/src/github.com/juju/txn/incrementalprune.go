@@ -148,13 +148,14 @@ func NewIncrementalPruner(args IncrementalPruneArgs) *IncrementalPruner {
 		args.TxnBatchSleepTime = maxBatchSleepTime
 	}
 	return &IncrementalPruner{
-		maxTime:      args.MaxTime,
-		reverse:      args.ReverseOrder,
-		txnBatchSize: args.TxnBatchSize,
-		ProgressChan: args.ProgressChannel,
-		docCache:     docCache{cache: lru.New(pruneDocCacheSize)},
-		missingCache: missingKeyCache{cache: lru.New(missingKeyCacheSize)},
-		strCache:     lru.NewStringCache(strCacheSize),
+		maxTime:        args.MaxTime,
+		reverse:        args.ReverseOrder,
+		txnBatchSize:   args.TxnBatchSize,
+		batchSleepTime: args.TxnBatchSleepTime,
+		ProgressChan:   args.ProgressChannel,
+		docCache:       docCache{cache: lru.New(pruneDocCacheSize)},
+		missingCache:   missingKeyCache{cache: lru.New(missingKeyCacheSize)},
+		strCache:       lru.NewStringCache(strCacheSize),
 	}
 }
 
