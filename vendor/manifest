@@ -20,6 +20,12 @@
 			"branch": "master"
 		},
 		{
+			"importpath": "github.com/juju/lru",
+			"repository": "https://github.com/juju/lru",
+			"revision": "305dec07bf2f69353bb05fa849e2a0834e220f94",
+			"branch": "master"
+		},
+		{
 			"importpath": "github.com/juju/retry",
 			"repository": "https://github.com/juju/retry",
 			"revision": "1998d01ba1c3eeb4a4728c4a50660025b2fe7c8f",
@@ -36,6 +42,12 @@
 			"repository": "https://github.com/juju/txn",
 			"revision": "f08211fa34f20cae79efd3dde0f54c77238292c3",
 			"branch": "master"
+		},
+		{
+			"importpath": "github.com/juju/txn",
+			"repository": "https://github.com/jameinel/juju-txn",
+			"revision": "328c5a8dc201aabf36ede4b088798954eede67dc",
+			"branch": "incremental-prune"
 		},
 		{
 			"importpath": "github.com/juju/utils",
@@ -83,8 +95,8 @@
 		},
 		{
 			"importpath": "gopkg.in/mgo.v2",
-			"repository": "https://gopkg.in/mgo.v2",
-			"revision": "29cc868a5ca65f401ff318143f9408d02f4799cc",
+			"repository": "https://github.com/juju/mgo",
+			"revision": "9ecfba03d10a21015af9bbd42aa0512dc0cf9514",
 			"branch": "HEAD"
 		},
 		{
