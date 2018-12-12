@@ -4,12 +4,14 @@
 package txn
 
 import (
+	"fmt"
+	"reflect"
+	"strings"
 	"sync"
 	"time"
 
 	"github.com/juju/errors"
 	"github.com/juju/lru"
-	"github.com/kr/pretty"
 	"gopkg.in/mgo.v2"
 	"gopkg.in/mgo.v2/bson"
 )
@@ -24,7 +26,7 @@ const pruneDocCacheSize = 10000
 const missingKeyCacheSize = 2000
 const strCacheSize = 10000
 
-// IncrementalPruner reads the transzaction table incrementally, seeing if it can remove the current set of transactions,
+// IncrementalPruner reads the transaction table incrementally, seeing if it can remove the current set of transactions,
 // and then moves on to newer transactions. It only thinks about 1k txns at a time, because that is the batch size that
 // can be deleted. Instead, it caches documents that it has seen.
 type IncrementalPruner struct {
@@ -75,9 +77,9 @@ type IncrementalPruneArgs struct {
 // PrunerStats collects statistics about how the prune progressed
 type PrunerStats struct {
 	CacheLookupTime    time.Duration
+	DocReadTime        time.Duration
 	DocLookupTime      time.Duration
 	DocCleanupTime     time.Duration
-	DocReadTime        time.Duration
 	StashLookupTime    time.Duration
 	StashRemoveTime    time.Duration
 	TxnReadTime        time.Duration
@@ -97,10 +99,55 @@ type PrunerStats struct {
 	DocsAlreadyClean   int64
 	TxnsRemoved        int64
 	TxnsNotRemoved     int64
-	ObjCacheHits       int64
-	ObjCacheMisses     int64
+	StrCacheHits       int64
+	StrCacheMisses     int64
 }
 
+func (ps PrunerStats) String() string {
+	durationType := reflect.TypeOf(time.Second)
+	v := reflect.ValueOf(ps)
+	t := v.Type()
+	longestAttrLength := 1
+	longestValueLength := 1
+	longestTimeLength := 1
+	values := make([]string, t.NumField())
+	for i := 0; i < t.NumField(); i++ {
+		attr := t.Field(i)
+		if len(attr.Name) > longestAttrLength {
+			longestAttrLength = len(attr.Name)
+		}
+		val := v.Field(i)
+		var valStr string
+		if val.Type() == durationType {
+			valStr = fmt.Sprintf("%.3f", val.Interface().(time.Duration).Round(time.Millisecond).Seconds())
+			if len(valStr) > longestTimeLength {
+				longestTimeLength = len(valStr)
+			}
+		} else {
+			valStr = fmt.Sprint(val.Interface())
+			if len(valStr) > longestValueLength {
+				longestValueLength = len(valStr)
+			}
+		}
+		values[i] = valStr
+	}
+	resultStrs := []string{
+		"PrunerStats(",
+	}
+	for i := 0; i < t.NumField(); i++ {
+		fieldWidth := longestValueLength
+		field := t.Field(i)
+		if field.Type == durationType {
+			fieldWidth = longestTimeLength
+		}
+		next := fmt.Sprintf("  %*s: %*s", longestAttrLength, field.Name, fieldWidth, values[i])
+		resultStrs = append(resultStrs, next)
+	}
+	resultStrs = append(resultStrs, ")")
+	return strings.Join(resultStrs, "\n")
+}
+
+// CombineStats aggregates two stats into a single value
 func CombineStats(a, b PrunerStats) PrunerStats {
 	return PrunerStats{
 		CacheLookupTime:    a.CacheLookupTime + b.CacheLookupTime,
@@ -126,8 +173,8 @@ func CombineStats(a, b PrunerStats) PrunerStats {
 		DocsAlreadyClean:   a.DocsAlreadyClean + b.DocsAlreadyClean,
 		TxnsRemoved:        a.TxnsRemoved + b.TxnsRemoved,
 		TxnsNotRemoved:     a.TxnsNotRemoved + b.TxnsNotRemoved,
-		ObjCacheHits:       a.ObjCacheHits + b.ObjCacheHits,
-		ObjCacheMisses:     a.ObjCacheMisses + b.ObjCacheMisses,
+		StrCacheHits:       a.StrCacheHits + b.StrCacheHits,
+		StrCacheMisses:     a.StrCacheMisses + b.StrCacheMisses,
 	}
 }
 
@@ -205,12 +252,12 @@ func (p *IncrementalPruner) Prune(txns *mgo.Collection) (PrunerStats, error) {
 		}
 	}
 	hits := p.strCache.HitCounts()
-	p.stats.ObjCacheHits = hits.Hit
-	p.stats.ObjCacheMisses = hits.Miss
+	p.stats.StrCacheHits = hits.Hit
+	p.stats.StrCacheMisses = hits.Miss
 	if firstErr == nil {
 		firstErr = p.cleanupStash(txnsStash)
 	}
-	logger.Debugf("pruneStats: %# v", pretty.Sprint(p.stats))
+	logger.Debugf("%s", p.stats)
 	return p.stats, errors.Trace(firstErr)
 }
 
@@ -246,6 +293,8 @@ func checkTime(toAdd *time.Duration) func() {
 
 func (p *IncrementalPruner) cleanupStash(txnsStash *mgo.Collection) error {
 	tStart := time.Now()
+	// TODO(jam):  2018-12-12 Do we need to worry about the txn-remove/txn-insert
+	//  attributes?
 	info, err := txnsStash.RemoveAll(
 		bson.M{"txn-queue.0": bson.M{"$exists": 0}},
 	)
@@ -522,6 +571,7 @@ func (p *IncrementalPruner) cleanupDoc(
 	collection string,
 	doc docWithQueue,
 	txnsBeingCleaned map[bson.ObjectId]struct{},
+	foundDocs docMap,
 	db *mgo.Database,
 	txnsStash *mgo.Collection,
 ) (bool, error) {
@@ -562,6 +612,7 @@ func (p *IncrementalPruner) cleanupDoc(
 	doc.Queue = newQueue
 	doc.txns = newTxnIds
 	// Update the known Queue of the document, since we cleaned it.
+	foundDocs[dKey] = doc
 	p.docCache.Add(dKey, doc)
 	return true, nil
 }
@@ -600,7 +651,7 @@ func (p *IncrementalPruner) cleanupDocs(
 				}
 				continue
 			}
-			updated, err := p.cleanupDoc(docKey.Collection, doc, txnsBeingCleaned, db, txnsStash)
+			updated, err := p.cleanupDoc(docKey.Collection, doc, txnsBeingCleaned, foundDocs, db, txnsStash)
 			if err != nil {
 				return errors.Trace(err)
 			}

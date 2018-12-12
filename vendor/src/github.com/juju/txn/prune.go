@@ -10,7 +10,6 @@ import (
 	"time"
 
 	"github.com/juju/errors"
-	"github.com/kr/pretty"
 	"gopkg.in/mgo.v2"
 	"gopkg.in/mgo.v2/bson"
 )
@@ -353,7 +352,7 @@ func CleanAndPrune(args CleanAndPruneArgs) (CleanupStats, error) {
 		pstats.TxnsRemoved,
 		pstats.DocQueuesCleaned,
 		time.Since(tStart).Round(time.Millisecond))
-	logger.Debugf("prune stats: %s", pretty.Sprint(pstats))
+	logger.Debugf("%s", pstats)
 	stats.TransactionsRemoved = int(pstats.TxnsRemoved)
 	stats.DocsCleaned = int(pstats.DocQueuesCleaned)
 	stats.StashDocumentsRemoved = int(pstats.StashDocsRemoved)
