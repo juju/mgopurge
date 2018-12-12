@@ -266,7 +266,7 @@ func commandLine() commandLineArgs {
 	flags.IntVar(&txnBatchSize, "txn-batch-size", defaultTxnBatchSize,
 		"how many transactions to prune at once, higher requires more memory but completes faster")
 	flags.IntVar(&maxTxnsToProcess, "max-txns", defaultMaxTxnsToProcess,
-		"how many transactions to consider completed per pass")
+		"(deprecated and ignored) we used to process txns in large batches, we now do small batches, see prune-batch-size")
 	flags.BoolVar(&multithreaded, "multithreaded", true,
 		"by default mgopurge will run multiple prune passes in parallel, set to false to disable")
 	flags.IntVar(&pruneTxnBatchSize, "prune-batch-size", defaultPruneTxnBatchSize,
