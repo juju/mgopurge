@@ -333,6 +333,8 @@ func CleanAndPrune(args CleanAndPruneArgs) (CleanupStats, error) {
 		pstats = CombineStats(pstats, stats)
 		if anyErr == nil {
 			anyErr = errors.Trace(err)
+		} else if err != nil {
+			logger.Warningf("second error while handling initial error: %v", err)
 		}
 		mu.Unlock()
 		wg.Done()

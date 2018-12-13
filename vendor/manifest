@@ -40,14 +40,8 @@
 		{
 			"importpath": "github.com/juju/txn",
 			"repository": "https://github.com/juju/txn",
-			"revision": "f08211fa34f20cae79efd3dde0f54c77238292c3",
+			"revision": "b66278d4d2feaf6143e1965dab76bfc884d13f52",
 			"branch": "master"
-		},
-		{
-			"importpath": "github.com/juju/txn",
-			"repository": "https://github.com/jameinel/juju-txn",
-			"revision": "328c5a8dc201aabf36ede4b088798954eede67dc",
-			"branch": "incremental-prune"
 		},
 		{
 			"importpath": "github.com/juju/utils",

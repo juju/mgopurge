@@ -47,7 +47,7 @@ type ProgressMessage struct {
 	DocsCleaned int
 }
 
-// IncrementalPruneArgs specifies the parameters for running incremental cleanup steps..
+// IncrementalPruneArgs specifies the parameters for running incremental cleanup steps.
 type IncrementalPruneArgs struct {
 	// MaxTime is a timestamp that provides a threshold of transactions
 	// that we will actually prune. Only transactions that were created
@@ -63,7 +63,7 @@ type IncrementalPruneArgs struct {
 	// oldest instead of form oldest to newest.
 	ReverseOrder bool
 
-	// TxnBatchSize is how many transaction to process at once.
+	// TxnBatchSize is how many transactions to process at once.
 	TxnBatchSize int
 
 	// TxnBatchSleepTime is how long we should sleep between processing transaction
@@ -72,6 +72,11 @@ type IncrementalPruneArgs struct {
 	// The default is to not sleep at all, but this can be configured to reduce
 	// load while pruning.
 	TxnBatchSleepTime time.Duration
+
+	// TODO(jam): 2018-12-12 Include a github.com/juju/clock.Clock
+	// interface so that we can test that sleep is properly handled per
+	// batch. Potentially we could also test that we measure performance
+	// counters correctly.
 }
 
 // PrunerStats collects statistics about how the prune progressed
@@ -642,7 +647,7 @@ func (p *IncrementalPruner) cleanupDocs(
 				p.missingCache.KnownMissing(docKey)
 				if docKey.Collection == "metrics" {
 					// Note: (jam 2018-12-06) This is a special case. Metrics are
-					// *known* to violate the transaction guarantees. The are
+					// *known* to violate the transaction guarantees. They are
 					// created and updated with the transaction logic, but are
 					// removed in bulk without transaction logic.
 					logger.Tracef("ignoring missing metrics doc: %v", docKey)
@@ -705,7 +710,7 @@ func (p *IncrementalPruner) findTxnsToPull(doc docWithQueue, txnsBeingCleaned ma
 	return tokensToPull, newQueue, newTxns
 }
 
-func (p *IncrementalPruner) removeTxns(txnsToDelete []bson.ObjectId, txns *mgo.Collection, errorCh chan error, wg *sync.WaitGroup) error {
+func (p *IncrementalPruner) removeTxns(txnsToDelete []bson.ObjectId, txns *mgo.Collection, errorCh chan error, wg *sync.WaitGroup) {
 	wg.Add(1)
 	session := txns.Database.Session.Copy()
 	txns = txns.With(session)
@@ -728,7 +733,6 @@ func (p *IncrementalPruner) removeTxns(txnsToDelete []bson.ObjectId, txns *mgo.C
 		session.Close()
 		wg.Done()
 	}()
-	return nil
 }
 
 // docWithQueue is used to serialize a Mongo document that has a txn-queue

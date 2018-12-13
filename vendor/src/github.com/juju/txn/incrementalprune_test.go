@@ -152,14 +152,22 @@ func (s *IncrementalPruneSuite) TestPruneCleansUpStash(c *gc.C) {
 	txnsStash := s.db.C("txns.stash")
 	stashId := bson.D{{"c", "docs"}, {"id", "1"}}
 	c.Assert(txnsStash.FindId(stashId).One(&doc), jc.ErrorIsNil)
-	c.Check(doc.Queue, gc.HasLen, 1)
+	// Old versions of gopkg.in/mgo.v2 di not clean up the txn-queue during remove
+	// handle both versions here
+	extraTokens := 0
+	if len(doc.Queue) == 2 {
+		extraTokens = 1
+		c.Check(doc.Queue, gc.HasLen, 2)
+	} else {
+		c.Check(doc.Queue, gc.HasLen, 1)
+	}
 	pruner := NewIncrementalPruner(IncrementalPruneArgs{})
 	stats, err := pruner.Prune(s.txns)
 	c.Assert(err, jc.ErrorIsNil)
 	c.Check(stats.TxnsRemoved, gc.Equals, int64(2))
 	c.Check(stats.DocReads, gc.Equals, int64(0))
 	c.Check(stats.DocQueuesCleaned, gc.Equals, int64(1))
-	c.Check(stats.DocTokensCleaned, gc.Equals, int64(1))
+	c.Check(stats.DocTokensCleaned, gc.Equals, int64(1+extraTokens))
 	c.Check(stats.DocsMissing, gc.Equals, int64(0))
 	c.Check(stats.StashDocReads, gc.Equals, int64(1))
 	c.Check(stats.StashDocsRemoved, gc.Equals, int64(1))
@@ -238,7 +246,15 @@ func (s *IncrementalPruneSuite) TestPruneLeavesIncompleteStashAlone(c *gc.C) {
 	txnsStash := s.db.C("txns.stash")
 	stashId := bson.D{{"c", "docs"}, {"id", "1"}}
 	c.Assert(txnsStash.FindId(stashId).One(&doc), jc.ErrorIsNil)
-	c.Check(doc.Queue, gc.HasLen, 2)
+	// Old versions of gopkg.in/mgo.v2 di not clean up the txn-queue during remove
+	// handle both versions here
+	extraTokens := 0
+	if len(doc.Queue) == 3 {
+		extraTokens = 1
+		c.Check(doc.Queue, gc.HasLen, 3)
+	} else {
+		c.Check(doc.Queue, gc.HasLen, 2)
+	}
 	pruner := NewIncrementalPruner(IncrementalPruneArgs{})
 	stats, err := pruner.Prune(s.txns)
 	c.Assert(err, jc.ErrorIsNil)
@@ -247,7 +263,7 @@ func (s *IncrementalPruneSuite) TestPruneLeavesIncompleteStashAlone(c *gc.C) {
 	c.Check(stats.TxnsRemoved, gc.Equals, int64(2))
 	c.Check(stats.DocReads, gc.Equals, int64(0))
 	c.Check(stats.DocQueuesCleaned, gc.Equals, int64(1))
-	c.Check(stats.DocTokensCleaned, gc.Equals, int64(1))
+	c.Check(stats.DocTokensCleaned, gc.Equals, int64(1+extraTokens))
 	c.Check(stats.DocsMissing, gc.Equals, int64(0))
 	c.Check(stats.StashDocReads, gc.Equals, int64(1))
 	c.Check(stats.StashDocsRemoved, gc.Equals, int64(0))
