@@ -4,11 +4,12 @@
 package txn
 
 import (
-	"errors"
 	"fmt"
 	"strings"
+	"sync"
 	"time"
 
+	"github.com/juju/errors"
 	"gopkg.in/mgo.v2"
 	"gopkg.in/mgo.v2/bson"
 )
@@ -149,13 +150,18 @@ func maybePrune(db *mgo.Database, txnsName string, pruneOpts PruneOptions) error
 		// transactions repeatedly. However, as long as the queries prefer
 		// old transactions, the chances that those are stale is low.
 		batchStarted := time.Now()
+		session := txns.Database.Session.Copy()
+		defer session.Close()
+		localTxns := txns.With(session)
 		batchStats, err := CleanAndPrune(CleanAndPruneArgs{
-			Txns:                     txns,
+			Txns:                     localTxns,
 			TxnsCount:                txnsCount,
 			MaxTime:                  pruneOpts.MaxTime,
 			MaxTransactionsToProcess: pruneOpts.MaxBatchTransactions,
 		})
-
+		if err != nil {
+			return errors.Trace(err)
+		}
 		txnsCountAfter, err = txns.Count()
 		if err != nil {
 			return fmt.Errorf("failed to retrieve final txns count: %v", err)
@@ -210,11 +216,40 @@ type CleanAndPruneArgs struct {
 	// MaxTransactionsToProcess defines how many completed transactions that we will evaluate in this batch.
 	// A value of 0 indicates we should evaluate all completed transactions.
 	MaxTransactionsToProcess int
+
+	// Multithreaded will start multiple pruning passes concurrently
+	Multithreaded bool
+
+	// TxnBatchSize is how many transaction to process at once.
+	TxnBatchSize int
+
+	// TxnBatchSleepTime is how long we should sleep between processing transaction
+	// batches, to allow other parts of the system to operate (avoid consuming
+	// all resources)
+	// The default is to not sleep at all, but this can be configured to reduce
+	// load while pruning.
+	TxnBatchSleepTime time.Duration
 }
 
 func (args *CleanAndPruneArgs) validate() error {
 	if args.Txns == nil {
 		return errors.New("nil Txns not valid")
+	}
+	if args.TxnBatchSleepTime < 0 || args.TxnBatchSleepTime > maxBatchSleepTime {
+		return errors.Errorf("TxnBatchSleepTime (%s) must be between 0s and %s",
+			args.TxnBatchSleepTime, maxBatchSleepTime)
+	}
+	// A value of 0 indicates that we should use the default as it hasn't been set
+	if args.TxnBatchSize == 0 {
+		args.TxnBatchSize = pruneTxnBatchSize
+	}
+	if args.TxnBatchSize < pruneMinTxnBatchSize {
+		return errors.Errorf("TxnBatchSize %d too small, must be between %d and %d",
+			args.TxnBatchSize, pruneMinTxnBatchSize, pruneMaxTxnBatchSize)
+	}
+	if args.TxnBatchSize > pruneMaxTxnBatchSize {
+		return errors.Errorf("TxnBatchSize %d too big, must be between %d and %d",
+			args.TxnBatchSize, pruneMinTxnBatchSize, pruneMaxTxnBatchSize)
 	}
 	return nil
 }
@@ -242,47 +277,88 @@ type CleanupStats struct {
 	ShouldRetry bool
 }
 
+func startReportingThread(stop <-chan struct{}, progressCh chan ProgressMessage) {
+	tStart := time.Now()
+	next := time.After(15 * time.Second)
+	go func() {
+		txnsRemoved := 0
+		docsCleaned := 0
+		for {
+			select {
+			case <-stop:
+				return
+			case msg := <-progressCh:
+				txnsRemoved += msg.TxnsRemoved
+				docsCleaned += msg.DocsCleaned
+			case <-next:
+				txnRate := 0.0
+				since := time.Since(tStart).Seconds()
+				if since > 0 {
+					txnRate = float64(txnsRemoved) / since
+				}
+				logger.Debugf("pruning has removed %d txns (%.0ftxn/s) cleaning %d docs ",
+					txnsRemoved, txnRate, docsCleaned)
+				next = time.After(15 * time.Second)
+			}
+		}
+	}()
+}
+
 // CleanAndPrune runs the cleanup steps, and then follows up with pruning all
 // of the transactions that are no longer referenced.
 func CleanAndPrune(args CleanAndPruneArgs) (CleanupStats, error) {
+	tStart := time.Now()
 	var stats CleanupStats
 
 	if err := args.validate(); err != nil {
 		return stats, err
 	}
-
-	db := args.Txns.Database
-
-	if args.TxnsCount <= 0 {
-		txnsCount, err := args.Txns.Count()
-		if err != nil {
-			return stats, err
+	stop := make(chan struct{})
+	progressCh := make(chan ProgressMessage)
+	startReportingThread(stop, progressCh)
+	var wg sync.WaitGroup
+	var mu sync.Mutex
+	var pstats PrunerStats
+	var anyErr error
+	prune := func(reversed bool) {
+		pruner := NewIncrementalPruner(IncrementalPruneArgs{
+			MaxTime:           args.MaxTime,
+			ProgressChannel:   progressCh,
+			ReverseOrder:      reversed,
+			TxnBatchSize:      args.TxnBatchSize,
+			TxnBatchSleepTime: args.TxnBatchSleepTime,
+		})
+		stats, err := pruner.Prune(args.Txns)
+		mu.Lock()
+		pstats = CombineStats(pstats, stats)
+		if anyErr == nil {
+			anyErr = errors.Trace(err)
+		} else if err != nil {
+			logger.Warningf("second error while handling initial error: %v", err)
 		}
-		args.TxnsCount = txnsCount
+		mu.Unlock()
+		wg.Done()
 	}
-
-	oracle, cleanup, err := getOracle(args, maxMemoryTokens, args.MaxTransactionsToProcess)
-	defer cleanup()
-	if err != nil {
-		return stats, err
+	if args.Multithreaded {
+		wg.Add(1)
+		go prune(true)
 	}
-	txnsStashName := args.Txns.Name + ".stash"
-	txnsStash := db.C(txnsStashName)
-
-	if args.MaxTransactionsToProcess > 0 && oracle.Count() > int(float64(args.MaxTransactionsToProcess)*0.9) {
-		stats.ShouldRetry = true
+	wg.Add(1)
+	prune(false)
+	wg.Wait()
+	close(stop)
+	if anyErr != nil {
+		return stats, errors.Trace(anyErr)
 	}
-	if err := cleanupStash(oracle, txnsStash, &stats); err != nil { // XXX
-		return stats, err
-	}
-
-	if err := cleanupAllCollections(db, oracle, args.Txns.Name, &stats); err != nil {
-		return stats, err
-	}
-
-	if err := PruneTxns(oracle, args.Txns, &stats); err != nil {
-		return stats, err
-	}
+	logger.Infof("pruning removed %d txns and cleaned %d docs in %s.",
+		pstats.TxnsRemoved,
+		pstats.DocQueuesCleaned,
+		time.Since(tStart).Round(time.Millisecond))
+	logger.Debugf("%s", pstats)
+	stats.TransactionsRemoved = int(pstats.TxnsRemoved)
+	stats.DocsCleaned = int(pstats.DocQueuesCleaned)
+	stats.StashDocumentsRemoved = int(pstats.StashDocsRemoved)
+	stats.DocsInspected = int(pstats.DocCacheMisses + pstats.DocCacheHits)
 	return stats, nil
 }
 

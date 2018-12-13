@@ -3,7 +3,7 @@ PROJECT := github.com/juju/txn
 .PHONY: check-licence check-go check
 
 check: check-licence check-go
-	go test $(PROJECT)/...
+	go test -v $(PROJECT)/... -check.v
 
 check-licence:
 	@(fgrep -rl "Licensed under the LGPLv3" --exclude *.s .;\
@@ -13,7 +13,7 @@ check-licence:
 
 check-go:
 	$(eval GOFMT := $(strip $(shell gofmt -l .| sed -e "s/^/ /g")))
-	@(if [ x$(GOFMT) != x"" ]; then \
+	@(if [ "x$(GOFMT)" != "x" ]; then \
 		echo go fmt is sad: $(GOFMT); \
 		exit 1; \
 	fi )

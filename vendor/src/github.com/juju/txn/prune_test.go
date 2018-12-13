@@ -482,37 +482,6 @@ func (s *PruneSuite) TestPruningStatsBrokenLastPointer(c *gc.C) {
 		[]jc.SimpleMessage{{loggo.WARNING, `pruning stats pointer was broken .+`}})
 }
 
-func (s *PruneSuite) TestMaxBatchesAndMaxBatchTransactions(c *gc.C) {
-	const numTransactions = 10
-
-	for id := 0; id < numTransactions; id++ {
-		s.runTxn(c, txn.Op{
-			C:      "coll",
-			Id:     id,
-			Insert: bson.M{},
-		})
-
-	}
-	s.assertCollCount(c, "txns", 10)
-	// Now do a prune, but pass in limits to how much we will prune per pass, and how many passes we will do
-	r := jujutxn.NewRunner(jujutxn.RunnerParams{
-		Database:                  s.db,
-		TransactionCollectionName: s.txns.Name,
-		ChangeLogName:             s.txns.Name + ".log",
-		Clock:                     testclock.NewClock(time.Now()),
-	})
-	err := r.MaybePruneTransactions(jujutxn.PruneOptions{
-		PruneFactor:          2.0,
-		MinNewTransactions:   1,
-		MaxNewTransactions:   1000,
-		MaxBatches:           4,
-		MaxBatchTransactions: 2,
-	})
-	c.Assert(err, jc.ErrorIsNil)
-	// we should have pruned 2 txns in each batch, 4 batches, leaves us with 8 pruned, and 2 remaining.
-	s.assertCollCount(c, "txns", 2)
-}
-
 func (s *PruneSuite) makeTxnsForNewDoc(c *gc.C, count int) {
 	id := bson.NewObjectId()
 	s.runTxn(c, txn.Op{

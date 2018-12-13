@@ -23,11 +23,15 @@ import (
 const txnsC = "txns"
 const txnsStashC = txnsC + ".stash"
 const defaultMaxTxnsToProcess = 1 * 1000 * 1000
+const defaultPruneTxnBatchSize = 1000
 
 // TODO (jam): 2017-07-07 Change the stages to take a settings parameter
 // and move this into a local variable instead of a global variable.
 var txnBatchSize = defaultTxnBatchSize
+var pruneTxnBatchSize = defaultPruneTxnBatchSize
+var pruneSleepTimeMs = 0
 var maxTxnsToProcess = defaultMaxTxnsToProcess
+var multithreaded = true
 
 var controllerPrompt = `
 This program should only be used to recover from specific transaction
@@ -91,6 +95,9 @@ var allStages = []stage{
 					Txns:                     txns,
 					MaxTime:                  time.Now().Add(-time.Hour),
 					MaxTransactionsToProcess: maxTxnsToProcess,
+					Multithreaded:            multithreaded,
+					TxnBatchSize:             pruneTxnBatchSize,
+					TxnBatchSleepTime:        time.Duration(pruneSleepTimeMs) * time.Millisecond,
 				})
 				logger.Infof("clean and prune cleaned %d docs in %d collections\n"+
 					"  removed %d transactions and %d stash documents in %s",
@@ -259,7 +266,13 @@ func commandLine() commandLineArgs {
 	flags.IntVar(&txnBatchSize, "txn-batch-size", defaultTxnBatchSize,
 		"how many transactions to prune at once, higher requires more memory but completes faster")
 	flags.IntVar(&maxTxnsToProcess, "max-txns", defaultMaxTxnsToProcess,
-		"how many transactions to consider completed per pass")
+		"(deprecated and ignored) we used to process txns in large batches, we now do small batches, see prune-batch-size")
+	flags.BoolVar(&multithreaded, "multithreaded", true,
+		"by default mgopurge will run multiple prune passes in parallel, set to false to disable")
+	flags.IntVar(&pruneTxnBatchSize, "prune-batch-size", defaultPruneTxnBatchSize,
+		"during 'prune' process this many transactions together")
+	flags.IntVar(&pruneSleepTimeMs, "prune-batch-sleep-ms", 0,
+		"during 'prune' sleep this long between batches (reduces load)")
 	var rawStages string
 	flags.StringVar(&rawStages, "stages", "",
 		"comma separated list of stages to run (default is to run all)")

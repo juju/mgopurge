@@ -173,11 +173,11 @@ type RunnerParams struct {
 // params, but if not, default values will be used.
 func NewRunner(params RunnerParams) Runner {
 	txnRunner := &transactionRunner{
-		db: params.Database,
+		db:                        params.Database,
 		transactionCollectionName: params.TransactionCollectionName,
 		changeLogName:             params.ChangeLogName,
 		runTransactionObserver:    params.RunTransactionObserver,
-		clock: params.Clock,
+		clock:                     params.Clock,
 	}
 	if txnRunner.transactionCollectionName == "" {
 		txnRunner.transactionCollectionName = defaultTxnCollectionName
