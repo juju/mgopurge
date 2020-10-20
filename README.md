@@ -10,17 +10,18 @@ mgopurge is typically run on one of the Juju controller machines. All
 controller machine agents must be shut down. Please ensure that the
 MongoDB replicaset is in a good state before running it.
 
-You'll need to determine the password for Juju's MongoDB by looking in
-the machine agent's configuration file using the following command:
+You'll need to determine the agent name and password for Juju's MongoDB
+by looking in the machine agent's configuration file using the following command:
 
 ```
-sudo grep oldpassword /var/lib/juju/agents/machine-*/agent.conf  | cut -d' ' -f2
+agent=$(cd /var/lib/juju/agents; echo machine-*)
+pw=$(sudo grep statepassword /var/lib/juju/agents/${agent}/agent.conf | cut '-d ' -sf2)
 ```
 
 Then run mgopurge like this:
 
 ```
-./mgopurge --password <password>
+./mgopurge --username $agent --password $pw
 ```
 
 By default mgopurge will attempt to connect to the port on localhost
