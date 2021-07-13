@@ -10,8 +10,8 @@ import (
 	"regexp"
 	"sort"
 
-	"gopkg.in/mgo.v2"
-	"gopkg.in/mgo.v2/bson"
+	"github.com/juju/mgo/v2"
+	"github.com/juju/mgo/v2/bson"
 )
 
 // PurgeMissing removes from collections any state that refers to transaction
