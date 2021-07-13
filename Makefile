@@ -1,13 +1,19 @@
+GB := ${GOPATH}/bin/gb
+
 build: generate
-	gb build
+	${GB} build
 
 # Remember to create annotated tag first. E.g. git tag -a v1.2
 release: clean check-clean generate
-	gb build -f
+	${GB} build -f
 
-snap-release: clean generate
+# Make sure that gb is available first
+dependencies:
+	go get github.com/constabulary/gb/...
+
+snap-release: clean generate dependencies
 	# snap modifies the source tree to remove the snap directory, so we can't run 'make check-clean'
-	gb build -f
+	${GB} build -f
 	cp bin/mgopurge ${SNAPCRAFT_PART_INSTALL}
 
 clean:
@@ -16,7 +22,7 @@ clean:
 check-clean:
 	@test -z "$$(git status -s)" || ( echo "uncommitted changes" ; false )
 
-generate:
-	gb generate
+generate: dependencies
+	${GB} generate
 
-.PHONY: build generate release clean check-clean
+.PHONY: build dependencies generate release clean check-clean
