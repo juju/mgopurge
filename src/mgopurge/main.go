@@ -24,11 +24,13 @@ const txnsC = "txns"
 const txnsStashC = txnsC + ".stash"
 const defaultMaxTxnsToProcess = 1 * 1000 * 1000
 const defaultPruneTxnBatchSize = 1000
+const defaultTrimQueueLength = 500
 
 // TODO (jam): 2017-07-07 Change the stages to take a settings parameter
 // and move this into a local variable instead of a global variable.
 var txnBatchSize = defaultTxnBatchSize
 var pruneTxnBatchSize = defaultPruneTxnBatchSize
+var trimQueueLength = defaultTrimQueueLength
 var pruneSleepTimeMs = 0
 var maxTxnsToProcess = defaultMaxTxnsToProcess
 var multithreaded = true
@@ -64,13 +66,13 @@ var allStages = []stage{
 		},
 	}, {
 		"trim",
-		"Trim txn-queues that are longer than 1000",
+		"Trim txn-queues that are longer than trim-queue-length",
 		func(db *mgo.Database, txns *mgo.Collection) error {
 			collections := getAllPurgeableCollections(db)
 			trimmer := &LongTxnTrimmer{
 				timer:        newSimpleTimer(15 * time.Second),
 				txns:         txns,
-				longTxnSize:  1000,
+				longTxnSize:  trimQueueLength,
 				txnBatchSize: txnBatchSize,
 				txnsStash:    db.C(txnsStashC),
 			}
@@ -265,6 +267,8 @@ func commandLine() commandLineArgs {
 		"set the log levels of various modules")
 	flags.IntVar(&txnBatchSize, "txn-batch-size", defaultTxnBatchSize,
 		"how many transactions to prune at once, higher requires more memory but completes faster")
+	flags.IntVar(&trimQueueLength, "trim-queue-length", defaultTrimQueueLength,
+		"how long to leave transaction queues after the 'trim' stage")
 	flags.IntVar(&maxTxnsToProcess, "max-txns", defaultMaxTxnsToProcess,
 		"(deprecated and ignored) we used to process txns in large batches, we now do small batches, see prune-batch-size")
 	flags.BoolVar(&multithreaded, "multithreaded", true,
