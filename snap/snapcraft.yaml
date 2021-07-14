@@ -26,3 +26,6 @@ parts:
         go-importpath: github.com/juju/mgopurge
         source: .
         source-type: git
+        override-build: |
+            go generate
+            snapcraftctl build
