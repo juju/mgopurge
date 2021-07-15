@@ -315,12 +315,15 @@ func commandLine() commandLineArgs {
 			skipped[strings.TrimSpace(s)] = true
 		}
 		for _, stage := range allStages {
-			if !skipped[stage.label] {
-				a.stages = append(a.stages, stage)
+			if skipped[stage.label] {
+				// We found the stage, so stop looking for it
 				delete(skipped, stage.label)
+			} else {
+				a.stages = append(a.stages, stage)
 			}
 		}
 		if len(skipped) > 0 {
+			// Check for typos
 			var invalid []string
 			for s := range skipped {
 				invalid = append(invalid, s)
@@ -363,7 +366,6 @@ func commandLine() commandLineArgs {
 	}
 
 	fmt.Fprintf(os.Stderr, "running stages: %v\n",torun)
-	os.Exit(1)
 	return a
 }
 
