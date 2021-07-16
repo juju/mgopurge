@@ -283,6 +283,9 @@ func commandLine() commandLineArgs {
 	var rawStages string
 	flags.StringVar(&rawStages, "stages", "",
 		"comma separated list of stages to run (default is to run all)")
+	var skipStages string
+	flags.StringVar(&skipStages, "skip-stages", "",
+		"comma separated list of stages to skip (default is to run all)")
 	listStagesFlag := flags.Bool("list", false, "list available execution stages")
 	yes := flags.Bool("yes", false, "answer 'yes' to prompts")
 	showVersion := flags.Bool("version", false, "show version")
@@ -305,7 +308,34 @@ func commandLine() commandLineArgs {
 	}
 	a.doPrompt = !*yes
 
-	if rawStages == "" {
+	if skipStages != "" {
+		if rawStages != "" {
+			fmt.Fprintf(os.Stderr, "you cannot supply both --stages and --skip-stages\n")
+			os.Exit(2)
+		}
+		skipped := make(map[string]bool)
+		for _, s := range strings.Split(skipStages, ",") {
+			skipped[strings.TrimSpace(s)] = true
+		}
+		for _, stage := range allStages {
+			if skipped[stage.label] {
+				// We found the stage, so stop looking for it.
+				delete(skipped, stage.label)
+			} else {
+				a.stages = append(a.stages, stage)
+			}
+		}
+		if len(skipped) > 0 {
+			// Check for typos.
+			var invalid []string
+			for s := range skipped {
+				invalid = append(invalid, s)
+			}
+			fmt.Fprintf(os.Stderr, "error: invalid stages to be skipped: %s\n",
+				strings.Join(invalid, ","))
+			os.Exit(2)
+		}
+	} else if rawStages == "" {
 		// No stages selected. Run all.
 		for _, stage := range allStages {
 			a.stages = append(a.stages, stage)
@@ -323,7 +353,7 @@ func commandLine() commandLineArgs {
 			}
 		}
 		if len(selected) > 0 {
-			// There were invalid stages selected
+			// There were invalid stages selected.
 			var invalid []string
 			for s := range selected {
 				invalid = append(invalid, s)
@@ -333,6 +363,12 @@ func commandLine() commandLineArgs {
 		}
 	}
 
+	torun := make([]string, len(a.stages))
+	for i, st := range a.stages {
+		torun[i] = st.label
+	}
+
+	fmt.Fprintf(os.Stderr, "running stages: %v\n",torun)
 	return a
 }
 
