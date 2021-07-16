@@ -316,14 +316,14 @@ func commandLine() commandLineArgs {
 		}
 		for _, stage := range allStages {
 			if skipped[stage.label] {
-				// We found the stage, so stop looking for it
+				// We found the stage, so stop looking for it.
 				delete(skipped, stage.label)
 			} else {
 				a.stages = append(a.stages, stage)
 			}
 		}
 		if len(skipped) > 0 {
-			// Check for typos
+			// Check for typos.
 			var invalid []string
 			for s := range skipped {
 				invalid = append(invalid, s)
@@ -333,7 +333,7 @@ func commandLine() commandLineArgs {
 			os.Exit(2)
 		}
 	} else if rawStages == "" {
-		// No stages selected. Run all
+		// No stages selected. Run all.
 		for _, stage := range allStages {
 			a.stages = append(a.stages, stage)
 		}
@@ -350,7 +350,7 @@ func commandLine() commandLineArgs {
 			}
 		}
 		if len(selected) > 0 {
-			// There were invalid stages selected
+			// There were invalid stages selected.
 			var invalid []string
 			for s := range selected {
 				invalid = append(invalid, s)
