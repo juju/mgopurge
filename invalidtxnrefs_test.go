@@ -48,6 +48,64 @@ func (s *InvalidTxnReferenceCleanerSuite) TestNoMissingDoc(c *gc.C) {
 	c.Check(result["txn-queue"], gc.HasLen, 1)
 }
 
+func (s *InvalidTxnReferenceCleanerSuite) TestTxnWithNoDoc(c *gc.C) {
+	err := s.runner.Run([]txn.Op{{
+		C:      "coll",
+		Id:     0,
+		Insert: bson.M{"foo": "bar"},
+	}}, "", nil)
+	c.Assert(err, jc.ErrorIsNil)
+	txn.SetChaos(txn.Chaos{
+		KillChance: 1,
+		Breakpoint: "set-applying",
+	})
+	defer txn.SetChaos(txn.Chaos{})
+	ops := []txn.Op{{
+		C:      s.coll.Name,
+		Id:     0,
+		Update: bson.M{"$set": bson.M{"foo": "baz"}},
+	}}
+	c.Assert(s.runner.Run(ops, "", nil), gc.Equals, txn.ErrChaos)
+	var result bson.M
+	err = s.coll.FindId(0).One(&result)
+	c.Assert(err, jc.ErrorIsNil)
+	c.Check(result["foo"], gc.Equals, "bar")
+	c.Check(result["txn-queue"], gc.HasLen, 2)
+	s.coll.RemoveId(0)
+	err = CleanupInvalidTxnReferences(s.txns)
+	c.Assert(err, jc.ErrorIsNil)
+	c.Assert(s.runner.ResumeAll(), jc.ErrorIsNil)
+}
+
+func (s *InvalidTxnReferenceCleanerSuite) TestTxnQueueMissingTxn(c *gc.C) {
+	err := s.runner.Run([]txn.Op{{
+		C:      "coll",
+		Id:     0,
+		Insert: bson.M{"foo": "bar"},
+	}}, "", nil)
+	c.Assert(err, jc.ErrorIsNil)
+	txn.SetChaos(txn.Chaos{
+		KillChance: 1,
+		Breakpoint: "set-applying",
+	})
+	defer txn.SetChaos(txn.Chaos{})
+	ops := []txn.Op{{
+		C:      s.coll.Name,
+		Id:     0,
+		Update: bson.M{"$set": bson.M{"foo": "baz"}},
+	}}
+	c.Assert(s.runner.Run(ops, "", nil), gc.Equals, txn.ErrChaos)
+	var result bson.M
+	err = s.coll.FindId(0).One(&result)
+	c.Assert(err, jc.ErrorIsNil)
+	c.Check(result["foo"], gc.Equals, "bar")
+	c.Check(result["txn-queue"], gc.HasLen, 2)
+	s.coll.RemoveId(0)
+	err = CleanupInvalidTxnReferences(s.txns)
+	c.Assert(err, jc.ErrorIsNil)
+	c.Assert(s.runner.ResumeAll(), jc.ErrorIsNil)
+}
+
 // func (s *InvalidTxnReferenceCleanerSuite) createDocWith51Txns(c *gc.C) {
 // 	err := s.runner.Run([]txn.Op{{
 // 		C:      s.coll.Name,

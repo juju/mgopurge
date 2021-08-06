@@ -22,24 +22,30 @@ type InvalidTxnReferenceCleaner struct {
 }
 
 
-func (invalidtxn *InvalidTxnReferenceCleaner) lookupDoc(coll string, id interface{}) (*txnDoc, error) {
+func (invalidtxn *InvalidTxnReferenceCleaner) lookupDoc(coll string, id interface{}) (txnDoc, error) {
 	var doc txnDoc
 	collection := invalidtxn.db.C(coll)
 	err := collection.FindId(id).One(&doc)
 	if err != nil {
-		return nil, err
+		return doc, err
 	}
+	return doc, nil
 }
-func (invalidtxn *InvalidTxnReferenceCleaner) Run() {
+
+func (invalidtxn *InvalidTxnReferenceCleaner) Run() error{
 	iter := invalidtxn.iterStagedTransactions()
 	var txn rawTransaction
 	for iter.Next(&txn) {
 		for _, op := range txn.Ops {
 			// TODO: eventually we could try to do this in some sort of batch lookup,
 			//  but for now that is premature optimization
-			doc, err := invalidtxn.lookupDoc(op.C, op.Id)
+			_, err := invalidtxn.lookupDoc(op.C, op.Id)
+			if err != nil {
+				return err
+			}
 		}
 	}
+	return nil
 }
 
 func (invalidtxn *InvalidTxnReferenceCleaner) iterStagedTransactions() *mgo.Iter{
@@ -57,4 +63,5 @@ func CleanupInvalidTxnReferences(txns *mgo.Collection) error {
 		db: txns.Database,
 		acceptablyMissingCollections: []string{},
 	}
+	return cleaner.Run()
 }
