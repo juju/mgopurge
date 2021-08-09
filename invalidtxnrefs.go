@@ -4,6 +4,7 @@
 package main
 
 import (
+	"github.com/juju/errors"
 	"github.com/juju/mgo/v2"
 	"github.com/juju/mgo/v2/bson"
 )
@@ -36,22 +37,53 @@ func (invalidtxn *InvalidTxnReferenceCleaner) Run() error{
 	iter := invalidtxn.iterStagedTransactions()
 	var txn rawTransaction
 	for iter.Next(&txn) {
+		token := txn.Id.Hex() + "_" + txn.Nonce
+		is_valid := true
 		for _, op := range txn.Ops {
-			// TODO: eventually we could try to do this in some sort of batch lookup,
-			//  but for now that is premature optimization
-			_, err := invalidtxn.lookupDoc(op.C, op.Id)
+			// TODO: jam 2021-08-09 eventually we could try to do this in some sort of batch
+			//  lookup, but for now that is premature optimization
+			doc, err := invalidtxn.lookupDoc(op.C, op.Id)
 			if err != nil {
-				return err
+				if err != mgo.ErrNotFound {
+					return errors.Trace(err)
+				}
+				logger.Infof("Transaction %q references a missing document %q %v",
+					token, op.C, op.Id)
+				is_valid = false
+				break
 			}
+			found := false
+			for _, tt := range doc.TxnQueue {
+				if tt == token {
+					found = true
+				}
+			}
+			if !found {
+				logger.Infof("Transaction %q references a document %q %v, " +
+					"but the txn is not found in transaction queue",
+					token, op.C, op.Id)
+				is_valid = false
+				break
+			}
+		}
+		if !is_valid {
+			// The best way to take a 'staged' transaction, and convert it to
+			// something safe is to remove the nonce and declare it "preparing"
+			// again
+			invalidtxn.txns.UpdateId(txn.Id, bson.M{"$set": bson.M{"s": tpreparing, "n": ""}})
 		}
 	}
 	return nil
 }
 
 func (invalidtxn *InvalidTxnReferenceCleaner) iterStagedTransactions() *mgo.Iter{
-	// Look for transactions that are in either stage 1 "Pending" or stage 2 "Prepared"
+	// TODO: jam 2021-08-09 Should we consider transactions in state 1 "preparing"?
+	//  I don't think we need to, because the should immediately go to failed once we try
+	//  to touch a document that doesn't exist
+
+	// Look for transactions that are in stage 2 "prepared"
 	query := invalidtxn.txns.Find(
-		bson.M{"s": bson.M{"$in": []int{1, 2}}},
+		bson.M{"s": bson.M{"$in": []int{tprepared}}},
 	).Select(txnFields)
 	return query.Iter()
 }
