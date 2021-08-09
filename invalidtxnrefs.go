@@ -88,11 +88,11 @@ func (invalidtxn *InvalidTxnReferenceCleaner) iterStagedTransactions() *mgo.Iter
 	return query.Iter()
 }
 
-func CleanupInvalidTxnReferences(txns *mgo.Collection) error {
+func CleanupInvalidTxnReferences(db *mgo.Database, txns *mgo.Collection) error {
 
 	cleaner := InvalidTxnReferenceCleaner{
 		txns: txns,
-		db: txns.Database,
+		db: db,
 		acceptablyMissingCollections: []string{},
 	}
 	return cleaner.Run()

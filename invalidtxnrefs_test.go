@@ -42,7 +42,7 @@ func (s *InvalidTxnReferenceCleanerSuite) TestNoMissingDoc(c *gc.C) {
 	c.Assert(err, jc.ErrorIsNil)
 	c.Check(result["foo"], gc.Equals, "bar")
 	c.Check(result["txn-queue"], gc.HasLen, 1)
-	err = CleanupInvalidTxnReferences(s.txns)
+	err = CleanupInvalidTxnReferences(s.db, s.txns)
 	c.Assert(err, jc.ErrorIsNil)
 	c.Check(result["foo"], gc.Equals, "bar")
 	c.Check(result["txn-queue"], gc.HasLen, 1)
@@ -83,7 +83,7 @@ func (s *InvalidTxnReferenceCleanerSuite) TestTxnWithNoDoc(c *gc.C) {
 	var raw rawTransaction
 	c.Assert(s.txns.FindId(oid).One(&raw), jc.ErrorIsNil)
 	c.Check(raw.State, gc.Equals, 2) // prepared
-	err = CleanupInvalidTxnReferences(s.txns)
+	err = CleanupInvalidTxnReferences(s.db, s.txns)
 	c.Assert(err, jc.ErrorIsNil)
 	c.Assert(s.txns.FindId(oid).One(&raw), jc.ErrorIsNil)
 	c.Check(raw.State, gc.Equals, 1) // preparing
