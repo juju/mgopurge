@@ -34,6 +34,7 @@ var trimQueueLength = defaultTrimQueueLength
 var pruneSleepTimeMs = 0
 var maxTxnsToProcess = defaultMaxTxnsToProcess
 var multithreaded = true
+// var deleteInvalidTxns = false
 
 var controllerPrompt = `
 This program should only be used to recover from specific transaction
@@ -59,14 +60,14 @@ var allStages = []stage{
 		},
 	}, {
 		"purgemissing",
-		"Purge orphaned transactions",
+		"Purge orphaned transactions, should not be run live",
 		func(db *mgo.Database, txns *mgo.Collection) error {
 			collections := getAllPurgeableCollections(db)
 			return PurgeMissing(txns, db.C(txnsStashC), collections...)
 		},
 	}, {
 		"trim",
-		"Trim txn-queues that are longer than trim-queue-length",
+		"Trim txn-queues that are longer than trim-queue-length, should not be run live",
 		func(db *mgo.Database, txns *mgo.Collection) error {
 			collections := getAllPurgeableCollections(db)
 			trimmer := &LongTxnTrimmer{
@@ -79,14 +80,18 @@ var allStages = []stage{
 			return trimmer.Trim(collections)
 		},
 	}, {
+		"invalidreferences",
+		"Handle transactions that aren't referenced by their docs, can be run live",
+		CleanupInvalidTxnReferences,
+	}, {
 		"resume",
-		"Resume incomplete transactions",
+		"Resume incomplete transactions. can be run live",
 		func(db *mgo.Database, txns *mgo.Collection) error {
 			return ResumeAll(txns)
 		},
 	}, {
 		"prune",
-		"Prune finalised transactions",
+		"Prune finalised transactions. can be run live",
 		func(db *mgo.Database, txns *mgo.Collection) error {
 			first := true
 			var totalStats jujutxn.CleanupStats
@@ -133,7 +138,7 @@ var allStages = []stage{
 		},
 	}, {
 		"compact",
-		"Compact database to release disk space (does not compact replicas)",
+		"Compact database to release disk space (does not compact replicas), should not be run live",
 		func(db *mgo.Database, _ *mgo.Collection) error {
 			err := compact(db)
 			if err != nil {
