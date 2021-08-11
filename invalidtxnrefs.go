@@ -14,12 +14,6 @@ import (
 type InvalidTxnReferenceCleaner struct {
 	txns *mgo.Collection
 	db *mgo.Database
-
-	// acceptablyMissingCollections lists the collection names that we 'accept' if they are
-	// missing. Normally the only collection that things should 'disappear' is "metrics".
-	// Because they are deleted by a batch process. However,
-	// we make this field serviceable by allowing additional collections to be supplied.
-	acceptablyMissingCollections []string
 }
 
 
@@ -38,7 +32,7 @@ func (invalidtxn *InvalidTxnReferenceCleaner) Run() error{
 	var txn rawTransaction
 	for iter.Next(&txn) {
 		token := txn.Id.Hex() + "_" + txn.Nonce
-		is_valid := true
+		isValid := true
 		for _, op := range txn.Ops {
 			// TODO: jam 2021-08-09 eventually we could try to do this in some sort of batch
 			//  lookup, but for now that is premature optimization
@@ -49,7 +43,7 @@ func (invalidtxn *InvalidTxnReferenceCleaner) Run() error{
 				}
 				logger.Infof("Transaction %q references a missing document %q %v",
 					token, op.C, op.Id)
-				is_valid = false
+				isValid = false
 				break
 			}
 			found := false
@@ -62,11 +56,11 @@ func (invalidtxn *InvalidTxnReferenceCleaner) Run() error{
 				logger.Infof("Transaction %q references a document %q %v, " +
 					"but the txn is not found in transaction queue",
 					token, op.C, op.Id)
-				is_valid = false
+				isValid = false
 				break
 			}
 		}
-		if !is_valid {
+		if !isValid {
 			// The best way to take a 'staged' transaction, and convert it to
 			// something safe is to remove the nonce and declare it "preparing"
 			// again
