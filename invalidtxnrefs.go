@@ -18,7 +18,7 @@ type InvalidTxnReferenceCleaner struct {
 	// acceptablyMissingCollections lists the collection names that we 'accept' if they are
 	// missing. Normally the only collection that things should 'disappear' is "metrics".
 	// Because they are deleted by a batch process. However,
-	//we make this field serviceable by allowing additional collections to be supplied.
+	// we make this field serviceable by allowing additional collections to be supplied.
 	acceptablyMissingCollections []string
 }
 

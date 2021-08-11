@@ -282,8 +282,6 @@ func commandLine() commandLineArgs {
 		"during 'prune' process this many transactions together")
 	flags.IntVar(&pruneSleepTimeMs, "prune-batch-sleep-ms", 0,
 		"during 'prune' sleep this long between batches (reduces load)")
-	// flags.BoolVar(&deleteInvalidTxns, "delete-invalid-txns", false,
-	// 	"if we encounter a transaction that doesn't fit our known issues, delete it anyway")
 	var rawStages string
 	flags.StringVar(&rawStages, "stages", "",
 		"comma separated list of stages to run (default is to run all)")
