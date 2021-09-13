@@ -87,7 +87,6 @@ func CleanupInvalidTxnReferences(db *mgo.Database, txns *mgo.Collection) error {
 	cleaner := InvalidTxnReferenceCleaner{
 		txns: txns,
 		db: db,
-		acceptablyMissingCollections: []string{},
 	}
 	return cleaner.Run()
 }
